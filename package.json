@@ -9,6 +9,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:build": "tauri build && bash scripts/sign-macos-bundle.sh",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "check": "tsc --noEmit"
   },
