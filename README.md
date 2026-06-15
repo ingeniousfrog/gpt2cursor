@@ -101,11 +101,21 @@ The Rust tests bind temporary localhost ports for integration coverage.
 Release builds are adhoc-signed for local use. After downloading from GitHub:
 
 1. Open the DMG and drag **gpt2cursor** onto the **Applications** folder shortcut.
-2. On first launch, if macOS blocks the app, open **System Settings → Privacy & Security** and click **Open Anyway**, or right-click the app and choose **Open**.
-3. If you still see **“gpt2cursor is damaged”**, remove quarantine attributes:
+2. Launch **gpt2cursor** from `/Applications`.
+3. If macOS says the app cannot be opened because the developer cannot be verified,
+   right-click **gpt2cursor** in Applications and choose **Open**, then confirm
+   **Open** again. You can also go to **System Settings → Privacy & Security**
+   and click **Open Anyway**.
+
+If macOS still blocks the app, or shows **“gpt2cursor is damaged and can't be
+opened”**, remove the quarantine attribute in Terminal:
 
 ```sh
 xattr -cr /Applications/gpt2cursor.app
 ```
 
-Then open the app again. Builds from `npm run tauri:build` run an extra signing step so the DMG is not rejected for a broken resource seal.
+Then open **gpt2cursor** again from Applications.
+
+This is expected for local adhoc-signed builds that are not notarized by Apple.
+Builds from `npm run tauri:build` still run an extra signing step so the DMG is
+not rejected for a broken resource seal.
