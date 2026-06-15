@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "gpt2cursor",
+  "version": "0.1.0",
+  "identifier": "com.gpt2cursor.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "gpt2cursor",
+        "width": 440,
+        "height": 640,
+        "visible": false,
+        "skipTaskbar": true,
+        "decorations": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["windowBackground"],
+          "radius": 26,
+          "state": "active"
+        }
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"],
+    "resources": ["icons/icon.png"]
+  }
+}
