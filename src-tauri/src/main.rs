@@ -10,7 +10,7 @@ use bridge::{
     base_url, is_port_available, start_bridge as start_bridge_server, BridgeRuntime, BridgeStatus,
     UsageSnapshot,
 };
-use codex::{probe_codex_status, RealCodexExecutor, CodexAccountStatus};
+use codex::{list_codex_models, probe_codex_status, CodexAccountStatus, CodexModelOption, RealCodexExecutor};
 use serde::{Deserialize, Serialize};
 use settings::{load_settings, save_settings as persist_settings, settings_path, AppSettings};
 use std::{
@@ -269,6 +269,13 @@ async fn refresh_codex_status() -> CodexAccountStatus {
 }
 
 #[tauri::command]
+async fn list_codex_model_options() -> Result<Vec<CodexModelOption>, String> {
+    tauri::async_runtime::spawn_blocking(list_codex_models)
+        .await
+        .map_err(|err| format!("Unable to refresh Codex models: {err}"))?
+}
+
+#[tauri::command]
 fn quit_app(app: AppHandle<Wry>, state: tauri::State<ManagedState>) {
     if let Ok(mut bridge) = state.bridge.lock() {
         if let Some(runtime) = bridge.take() {
@@ -374,6 +381,7 @@ fn main() {
             stop_bridge,
             set_launch_at_login,
             refresh_codex_status,
+            list_codex_model_options,
             quit_app
         ])
         .run(tauri::generate_context!())

@@ -25,7 +25,7 @@ impl Default for AppSettings {
             api_key: String::new(),
             model: "gpt2cursor-local".to_string(),
             codex_command: "codex".to_string(),
-            codex_model: String::new(),
+            codex_model: "gpt-5.5".to_string(),
             codex_profile: String::new(),
             codex_sandbox: "read-only".to_string(),
             codex_approval: "never".to_string(),

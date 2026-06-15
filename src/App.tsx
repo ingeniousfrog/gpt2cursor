@@ -67,6 +67,11 @@ type BridgeStatus = {
   usage: UsageSnapshot;
 };
 
+type CodexModelOption = {
+  id: string;
+  label: string;
+};
+
 type CodexStatus = {
   cli_installed: boolean;
   authenticated: boolean;
@@ -94,10 +99,8 @@ const defaultUsage: TokenUsage = {
   reasoning_output_tokens: 0,
 };
 
-const codexModelOptions = [
-  { value: "", label: "Use Codex default" },
+const defaultCodexModelOptions: Array<{ value: string; label: string }> = [
   { value: "gpt-5.5", label: "GPT-5.5" },
-  { value: "gpt-5", label: "GPT-5" },
 ];
 
 const profileOptions = [
@@ -121,7 +124,7 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
     api_key: "g2c_preview_5db6f88baf29d2c8",
     model: CURSOR_MODEL,
     codex_command: "codex",
-    codex_model: "",
+    codex_model: "gpt-5.5",
     codex_profile: "",
     codex_sandbox: "read-only",
     codex_approval: "never",
@@ -160,6 +163,13 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
   }
   if (command === "generate_api_key") {
     return "g2c_preview_6f7a3d88e16c4baf9120" as T;
+  }
+  if (command === "list_codex_model_options") {
+    return [
+      { id: "gpt-5.5", label: "GPT-5.5" },
+      { id: "gpt-5.4", label: "GPT-5.4" },
+      { id: "gpt-5.4-mini", label: "GPT-5.4-Mini" },
+    ] as T;
   }
   if (command === "refresh_codex_status") {
     return {
@@ -213,6 +223,24 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [codex, setCodex] = useState<CodexStatus | null>(null);
+  const [codexModelOptions, setCodexModelOptions] = useState(defaultCodexModelOptions);
+
+  const applyCodexModels = useCallback((models: CodexModelOption[], currentModel?: string) => {
+    const options = models.map((model) => ({ value: model.id, label: model.label }));
+    setCodexModelOptions(options);
+    const ids = new Set(models.map((model) => model.id));
+    const latest = models[0]?.id ?? "";
+    const nextModel = currentModel && ids.has(currentModel) ? currentModel : latest;
+    if (nextModel) {
+      setDraft((current) => current ? { ...current, codex_model: nextModel } : current);
+    }
+    return nextModel;
+  }, []);
+
+  const refreshCodexModels = useCallback(async (currentModel?: string) => {
+    const models = await call<CodexModelOption[]>("list_codex_model_options");
+    return applyCodexModels(models, currentModel);
+  }, [applyCodexModels]);
 
   const loadState = useCallback(async () => {
     const next = await call<AppViewState>("get_app_state");
@@ -280,7 +308,12 @@ export default function App() {
     setBusy("start");
     setError(null);
     try {
-      await call<AppViewState>("save_settings", { input: { settings } });
+      const nextModel = await refreshCodexModels(settings.codex_model);
+      const effectiveSettings = {
+        ...settings,
+        codex_model: nextModel || settings.codex_model || codexModelOptions[0]?.value || "gpt-5.5",
+      };
+      await call<AppViewState>("save_settings", { input: { settings: effectiveSettings } });
       const next = await call<AppViewState>("start_bridge");
       setState(next);
       setDraft(next.settings);
@@ -290,7 +323,7 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }, [refreshCodex, settings]);
+  }, [refreshCodex, refreshCodexModels, settings, codexModelOptions]);
 
   const stop = useCallback(async () => {
     setBusy("stop");
@@ -397,7 +430,9 @@ export default function App() {
       <div className="panel-scroll relative flex h-full flex-col gap-3 overflow-y-auto p-4">
         <section className="hero-card">
           <div className="flex min-w-0 items-center gap-3">
-            <img src={appIcon} alt="" className="h-14 w-14 rounded-[18px] object-contain shadow-logo" />
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-[18px] bg-white/35 p-1.5 shadow-logo">
+              <img src={appIcon} alt="" className="h-full w-full object-contain" />
+            </div>
             <div className="min-w-0 flex-1">
               <div className="label">Local Bridge</div>
               <div className="mt-1 flex items-center gap-2">

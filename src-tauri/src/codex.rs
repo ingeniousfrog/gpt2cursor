@@ -208,6 +208,63 @@ fn wait_with_timeout(
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct CodexModelOption {
+    pub id: String,
+    pub label: String,
+}
+
+pub fn list_codex_models() -> Result<Vec<CodexModelOption>, String> {
+    let output = Command::new(resolve_codex_command("codex"))
+        .args(["debug", "models"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|err| format!("Unable to run codex debug models: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "codex debug models failed".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    parse_codex_models(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn parse_codex_models(stdout: &str) -> Result<Vec<CodexModelOption>, String> {
+    let value: Value = serde_json::from_str(stdout.trim())
+        .map_err(|err| format!("Unable to parse codex model catalog: {err}"))?;
+    let models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex model catalog is missing a models array".to_string())?;
+
+    let mut options = Vec::new();
+    for model in models {
+        let Some(id) = model.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let label = model
+            .get("display_name")
+            .and_then(Value::as_str)
+            .or_else(|| model.get("name").and_then(Value::as_str))
+            .unwrap_or(id);
+        options.push(CodexModelOption {
+            id: id.to_string(),
+            label: label.to_string(),
+        });
+    }
+
+    if options.is_empty() {
+        return Err("Codex model catalog is empty".to_string());
+    }
+
+    Ok(options)
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct CodexAccountStatus {
     pub cli_installed: bool,
     pub authenticated: bool,
@@ -285,6 +342,15 @@ fn has_local_codex_auth() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_codex_model_catalog() {
+        let json = r#"{"models":[{"id":"gpt-5.5","display_name":"GPT-5.5"},{"id":"gpt-5.4","display_name":"GPT-5.4"}]}"#;
+        let models = parse_codex_models(json).unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gpt-5.5");
+        assert_eq!(models[1].label, "GPT-5.4");
+    }
 
     #[test]
     fn formats_prompt_from_chat_messages() {
