@@ -1,6 +1,6 @@
 [package]
 name = "gpt2cursor"
-version = "0.1.0"
+version = "0.1.1"
 description = "A local menu-bar Codex-to-Cursor bridge"
 authors = ["gpt2cursor"]
 edition = "2021"

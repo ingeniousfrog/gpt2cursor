@@ -23,7 +23,7 @@ impl Default for AppSettings {
         Self {
             port: DEFAULT_PORT,
             api_key: String::new(),
-            model: "codex-local".to_string(),
+            model: "gpt2cursor-local".to_string(),
             codex_command: "codex".to_string(),
             codex_model: String::new(),
             codex_profile: String::new(),
@@ -69,7 +69,11 @@ pub fn load_settings(path: &PathBuf) -> AppSettings {
     let Ok(raw) = fs::read_to_string(path) else {
         return AppSettings::default();
     };
-    serde_json::from_str::<AppSettings>(&raw).unwrap_or_default()
+    let mut settings = serde_json::from_str::<AppSettings>(&raw).unwrap_or_default();
+    if settings.model != "gpt2cursor-local" {
+        settings.model = "gpt2cursor-local".to_string();
+    }
+    settings
 }
 
 pub fn save_settings(path: &PathBuf, settings: &AppSettings) -> Result<(), String> {

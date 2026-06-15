@@ -5,7 +5,7 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -205,6 +205,81 @@ fn wait_with_timeout(
             Err(err) => return Err(format!("Unable to wait for Codex CLI: {err}")),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CodexAccountStatus {
+    pub cli_installed: bool,
+    pub authenticated: bool,
+    pub summary: String,
+    pub detail: String,
+    pub checked_at_ms: u64,
+}
+
+pub fn probe_codex_status() -> CodexAccountStatus {
+    let checked_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let executable = resolve_codex_command("codex");
+    let cli_installed = executable.exists() || which_codex_on_path();
+
+    if !cli_installed {
+        return CodexAccountStatus {
+            cli_installed: false,
+            authenticated: false,
+            summary: "Codex CLI not found".to_string(),
+            detail: "Install the Codex CLI and sign in locally. gpt2cursor reuses that session.".to_string(),
+            checked_at_ms,
+        };
+    }
+
+    let authenticated = has_local_codex_auth();
+    let summary = if authenticated {
+        "Codex CLI is authenticated".to_string()
+    } else {
+        "Codex CLI found; sign in required".to_string()
+    };
+    let detail = if authenticated {
+        "Local CLI session is ready. Per-session token usage updates below; account quota is not exposed by this CLI.".to_string()
+    } else {
+        "Run `codex login` in Terminal, then refresh. Account quota is unavailable through the local CLI.".to_string()
+    };
+
+    CodexAccountStatus {
+        cli_installed: true,
+        authenticated,
+        summary,
+        detail,
+        checked_at_ms,
+    }
+}
+
+fn which_codex_on_path() -> bool {
+    Command::new("which")
+        .arg("codex")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn has_local_codex_auth() -> bool {
+    let Ok(home) = std::env::var("HOME") else {
+        return false;
+    };
+    let home = PathBuf::from(home);
+    for relative in [
+        ".codex/auth.json",
+        ".codex/credentials.json",
+        ".config/codex/auth.json",
+    ] {
+        if home.join(relative).is_file() {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

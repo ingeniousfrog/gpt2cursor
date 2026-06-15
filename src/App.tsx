@@ -28,6 +28,8 @@ declare global {
   }
 }
 
+const CURSOR_MODEL = "gpt2cursor-local";
+
 type TokenUsage = {
   input_tokens: number;
   cached_input_tokens: number;
@@ -66,9 +68,11 @@ type BridgeStatus = {
 };
 
 type CodexStatus = {
-  available: boolean;
+  cli_installed: boolean;
+  authenticated: boolean;
   summary: string;
   detail: string;
+  checked_at_ms: number;
 };
 
 type AppViewState = {
@@ -89,11 +93,6 @@ const defaultUsage: TokenUsage = {
   output_tokens: 0,
   reasoning_output_tokens: 0,
 };
-
-const cursorModelOptions = [
-  { value: "codex-local", label: "codex-local" },
-  { value: "gpt2cursor-local", label: "gpt2cursor-local" },
-];
 
 const codexModelOptions = [
   { value: "", label: "Use Codex default" },
@@ -120,7 +119,7 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
   const settings: AppSettings = {
     port: 8787,
     api_key: "g2c_preview_5db6f88baf29d2c8",
-    model: "codex-local",
+    model: CURSOR_MODEL,
     codex_command: "codex",
     codex_model: "",
     codex_profile: "",
@@ -147,9 +146,11 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
       },
     },
     codex: {
-      available: false,
-      summary: "Codex status appears after the bridge starts",
-      detail: "The packaged Tauri app talks to the native Rust bridge.",
+      cli_installed: true,
+      authenticated: true,
+      summary: "Codex CLI is authenticated",
+      detail: "Local CLI session is ready.",
+      checked_at_ms: Date.now(),
     },
   };
 
@@ -162,9 +163,11 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
   }
   if (command === "refresh_codex_status") {
     return {
-      available: false,
-      summary: "Codex CLI is authenticated; account quota is not exposed by this CLI.",
-      detail: "Per-session token usage is shown reliably. Account quota uses best-effort local CLI status after startup.",
+      cli_installed: true,
+      authenticated: true,
+      summary: "Codex CLI is authenticated",
+      detail: "Local CLI session is ready. Per-session token usage updates below.",
+      checked_at_ms: Date.now(),
     } as T;
   }
   if (command === "save_settings" && args?.input && typeof args.input === "object") {
@@ -184,6 +187,11 @@ function formatDuration(ms: number) {
   return `${(ms / 1000).toFixed(ms > 10_000 ? 0 : 1)} s`;
 }
 
+function formatCheckedAt(ms: number) {
+  if (!ms) return "Not checked yet";
+  return new Date(ms).toLocaleTimeString();
+}
+
 function shortKey(key: string) {
   if (!key) return "Not set";
   return `${key.slice(0, 7)}...${key.slice(-5)}`;
@@ -201,6 +209,7 @@ export default function App() {
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [codexRefreshing, setCodexRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [codex, setCodex] = useState<CodexStatus | null>(null);
@@ -255,16 +264,16 @@ export default function App() {
   }, [settings]);
 
   const refreshCodex = useCallback(async () => {
-    setBusy("codex");
-    setError(null);
+    if (codexRefreshing) return;
+    setCodexRefreshing(true);
     try {
       setCodex(await call<CodexStatus>("refresh_codex_status"));
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      setBusy(null);
+      setCodexRefreshing(false);
     }
-  }, []);
+  }, [codexRefreshing]);
 
   const start = useCallback(async () => {
     if (!settings) return;
@@ -357,6 +366,20 @@ export default function App() {
     ];
   }, [usage]);
 
+  const sessionBars = useMemo(() => {
+    const snapshot = usage?.total_usage ?? defaultUsage;
+    const total = Math.max(totalTokens(snapshot), 1);
+    return [
+      { label: "Input", value: snapshot.input_tokens, color: "bg-sky-400" },
+      { label: "Cached", value: snapshot.cached_input_tokens, color: "bg-violet-400" },
+      { label: "Output", value: snapshot.output_tokens, color: "bg-emerald-400" },
+      { label: "Reasoning", value: snapshot.reasoning_output_tokens, color: "bg-amber-400" },
+    ].map((item) => ({
+      ...item,
+      pct: Math.min(100, Math.round((item.value / total) * 100)),
+    }));
+  }, [usage]);
+
   if (!settings || !state) {
     return (
       <main className="flex h-full items-center justify-center rounded-[26px] bg-panel text-sky-500">
@@ -413,21 +436,16 @@ export default function App() {
           <ol className="mt-2 space-y-1.5 text-xs leading-relaxed text-slate-600">
             <li>1. In Cursor Settings → Models, enable <span className="font-semibold text-slate-800">Override OpenAI Base URL</span> and paste the Base URL above.</li>
             <li>2. Paste the API Key from this app into <span className="font-semibold text-slate-800">OpenAI API Key</span>.</li>
-            <li>3. Click <span className="font-semibold text-slate-800">+ Add Custom Model</span> and add one of the model names below. Cursor does not auto-fetch models from custom endpoints.</li>
+            <li>3. Click <span className="font-semibold text-slate-800">+ Add Custom Model</span> and add <span className="font-mono font-semibold text-sky-700">{CURSOR_MODEL}</span>.</li>
           </ol>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {cursorModelOptions.map((option) => (
-              <button
-                key={option.value}
-                className="ghost-btn h-8 px-2.5 text-xs"
-                onClick={() => void copy(option.value, option.value)}
-                title={`Copy ${option.label}`}
-              >
-                {copied === option.value ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
-                {option.label}
-              </button>
-            ))}
-          </div>
+          <button
+            className="ghost-btn mt-3 h-8 px-2.5 text-xs"
+            onClick={() => void copy("model", CURSOR_MODEL)}
+            title="Copy model name"
+          >
+            {copied === "model" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
+            {CURSOR_MODEL}
+          </button>
         </section>
 
         {error && <div className="error-card">{error}</div>}
@@ -494,12 +512,10 @@ export default function App() {
           </button>
 
           <div className="mt-3 grid grid-cols-2 gap-2">
-            <SelectField
-              label="Cursor model"
-              value={settings.model}
-              options={cursorModelOptions}
-              onChange={(value) => updateDraft("model", value)}
-            />
+            <div className="block">
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Cursor model</span>
+              <div className="field flex items-center font-mono text-[13px]">{CURSOR_MODEL}</div>
+            </div>
             <SelectField
               label="Codex model"
               value={settings.codex_model}
@@ -560,14 +576,45 @@ export default function App() {
                   <Activity className="h-4 w-4 text-sky-500" />
                   <span className="label">Codex Status</span>
                 </div>
-                <button className="icon-btn h-8 w-8" onClick={refreshCodex} title="Refresh Codex status">
-                  {busy === "codex" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                <button
+                  className="icon-btn h-8 w-8"
+                  onClick={() => void refreshCodex()}
+                  disabled={codexRefreshing}
+                  title="Refresh Codex status"
+                >
+                  <RefreshCw className={`h-4 w-4 ${codexRefreshing ? "animate-spin" : ""}`} />
                 </button>
               </div>
-              <div className="text-sm font-bold text-slate-900">{codex?.summary ?? "Checking Codex CLI..."}</div>
+
+              <div className="mb-3 flex flex-wrap gap-2">
+                <StatusChip label="CLI" ok={codex?.cli_installed ?? false} />
+                <StatusChip label="Auth" ok={codex?.authenticated ?? false} />
+              </div>
+
+              <div className="text-sm font-bold text-slate-900">
+                {codex?.summary ?? "Tap refresh to check Codex CLI"}
+              </div>
               <p className="mt-1 text-xs leading-relaxed text-slate-500">
-                {codex?.detail ?? "This appears after the local bridge is started."}
+                {codex?.detail ?? "Session token usage updates automatically while the bridge is running."}
               </p>
+              <p className="mt-2 text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                Checked {formatCheckedAt(codex?.checked_at_ms ?? 0)}
+              </p>
+
+              <div className="mt-3 space-y-2">
+                <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Session tokens</div>
+                {sessionBars.map((bar) => (
+                  <div key={bar.label}>
+                    <div className="mb-1 flex items-center justify-between text-[11px] text-slate-600">
+                      <span>{bar.label}</span>
+                      <span className="font-mono font-semibold text-slate-800">{bar.value}</span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
+                      <div className={`h-full rounded-full ${bar.color}`} style={{ width: `${bar.pct}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
             </section>
           </>
         )}
@@ -586,6 +633,15 @@ export default function App() {
         {usage?.last_error && running && <div className="warning-card">Last request: {usage.last_error}</div>}
       </div>
     </main>
+  );
+}
+
+function StatusChip({ label, ok }: { label: string; ok: boolean }) {
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${ok ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-slate-300"}`} />
+      {label}
+    </span>
   );
 }
 

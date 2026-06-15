@@ -18,7 +18,7 @@ use std::{
 
 const HOST: &str = "127.0.0.1";
 const MAX_BODY_BYTES: usize = 1_048_576;
-pub const CURSOR_MODEL_IDS: &[&str] = &["codex-local", "gpt2cursor-local"];
+pub const CURSOR_MODEL_ID: &str = "gpt2cursor-local";
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct UsageSnapshot {
@@ -317,7 +317,7 @@ fn parse_chat_request(input: &Value) -> Result<ChatRequest, String> {
     let model = input
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or("codex-local")
+        .unwrap_or(CURSOR_MODEL_ID)
         .to_string();
     let stream = input.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let messages = input
@@ -366,17 +366,12 @@ fn parse_message(index: usize, message: &Value) -> Result<ChatMessage, String> {
 fn models_payload() -> Value {
     json!({
         "object": "list",
-        "data": CURSOR_MODEL_IDS
-            .iter()
-            .map(|id| {
-                json!({
-                    "id": id,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "local-codex"
-                })
-            })
-            .collect::<Vec<_>>()
+        "data": [{
+            "id": CURSOR_MODEL_ID,
+            "object": "model",
+            "created": 0,
+            "owned_by": "local-codex"
+        }]
     })
 }
 
@@ -542,7 +537,7 @@ mod tests {
     #[test]
     fn parses_chat_request_with_text_parts() {
         let input = json!({
-            "model":"codex-local",
+            "model":"gpt2cursor-local",
             "stream":true,
             "messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
         });
@@ -577,8 +572,8 @@ mod tests {
         let response = send_raw(port, "GET /v1/models HTTP/1.1\r\nauthorization: Bearer secret\r\n\r\n");
         runtime.stop();
         assert!(response.contains("HTTP/1.1 200 OK"));
-        assert!(response.contains("codex-local"));
         assert!(response.contains("gpt2cursor-local"));
+        assert!(!response.contains("codex-local"));
     }
 
     #[test]
@@ -593,7 +588,7 @@ mod tests {
     #[test]
     fn serves_non_streaming_chat_over_http() {
         let (runtime, port, usage) = test_runtime(Arc::new(MockExecutor));
-        let body = r#"{"model":"codex-local","messages":[{"role":"user","content":"hello"}]}"#;
+        let body = r#"{"model":"gpt2cursor-local","messages":[{"role":"user","content":"hello"}]}"#;
         let response = send_json(port, "/v1/chat/completions", body);
         runtime.stop();
         assert!(response.contains("HTTP/1.1 200 OK"));
@@ -604,7 +599,7 @@ mod tests {
     #[test]
     fn serves_streaming_chat_over_http() {
         let (runtime, port, _usage) = test_runtime(Arc::new(MockExecutor));
-        let body = r#"{"model":"codex-local","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
+        let body = r#"{"model":"gpt2cursor-local","stream":true,"messages":[{"role":"user","content":"hello"}]}"#;
         let response = send_json(port, "/v1/chat/completions", body);
         runtime.stop();
         assert!(response.contains("text/event-stream"));
@@ -623,7 +618,7 @@ mod tests {
     #[test]
     fn returns_502_when_codex_fails_over_http() {
         let (runtime, port, _usage) = test_runtime(Arc::new(FailingExecutor));
-        let body = r#"{"model":"codex-local","messages":[{"role":"user","content":"hello"}]}"#;
+        let body = r#"{"model":"gpt2cursor-local","messages":[{"role":"user","content":"hello"}]}"#;
         let response = send_json(port, "/v1/chat/completions", body);
         runtime.stop();
         assert!(response.contains("HTTP/1.1 502 Bad Gateway"));

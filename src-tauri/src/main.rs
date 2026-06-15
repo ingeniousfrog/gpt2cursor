@@ -10,15 +10,13 @@ use bridge::{
     base_url, is_port_available, start_bridge as start_bridge_server, BridgeRuntime, BridgeStatus,
     UsageSnapshot,
 };
-use codex::{resolve_codex_command, RealCodexExecutor};
+use codex::{probe_codex_status, RealCodexExecutor, CodexAccountStatus};
 use serde::{Deserialize, Serialize};
 use settings::{load_settings, save_settings as persist_settings, settings_path, AppSettings};
 use std::{
     fs::File,
     io::Read,
-    process::{Command, Stdio},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
 };
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, PhysicalPosition, WindowEvent, Wry};
@@ -41,13 +39,6 @@ struct PortValidation {
     port: u16,
     available: bool,
     message: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct CodexAccountStatus {
-    available: bool,
-    summary: String,
-    detail: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -265,8 +256,16 @@ fn set_launch_at_login(
 }
 
 #[tauri::command]
-fn refresh_codex_status() -> CodexAccountStatus {
-    codex_status()
+async fn refresh_codex_status() -> CodexAccountStatus {
+    tauri::async_runtime::spawn_blocking(probe_codex_status)
+        .await
+        .unwrap_or_else(|_| CodexAccountStatus {
+            cli_installed: false,
+            authenticated: false,
+            summary: "Codex status check failed".to_string(),
+            detail: "Unable to refresh Codex CLI status.".to_string(),
+            checked_at_ms: 0,
+        })
 }
 
 #[tauri::command]
@@ -308,62 +307,13 @@ fn app_state(app: &AppHandle, state: &tauri::State<ManagedState>) -> Result<AppV
             usage,
         },
         codex: CodexAccountStatus {
-            available: false,
-            summary: "Codex account quota not refreshed".to_string(),
-            detail: "Use Refresh to check local Codex CLI status. Per-session usage updates automatically.".to_string(),
+            cli_installed: false,
+            authenticated: false,
+            summary: "Tap refresh to check Codex CLI".to_string(),
+            detail: "Session token usage updates automatically while the bridge is running.".to_string(),
+            checked_at_ms: 0,
         },
     })
-}
-
-fn codex_status() -> CodexAccountStatus {
-    match run_codex_doctor_summary() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let combined = format!("{stdout}{stderr}");
-            CodexAccountStatus {
-                available: false,
-                summary: if combined.contains("auth is configured") || combined.contains("✓ auth") {
-                    "Codex CLI is authenticated; account quota is not exposed by this CLI.".to_string()
-                } else {
-                    "Codex CLI detected; account quota is unavailable.".to_string()
-                },
-                detail: "gpt2cursor shows reliable per-session token usage. Subscription or account quota is not exposed through a stable local Codex CLI interface.".to_string(),
-            }
-        }
-        Err(err) => CodexAccountStatus {
-            available: false,
-            summary: "Codex CLI is unavailable".to_string(),
-            detail: format!("Unable to run codex doctor: {err}"),
-        },
-    }
-}
-
-fn run_codex_doctor_summary() -> Result<std::process::Output, String> {
-    let mut child = Command::new(resolve_codex_command("codex"))
-        .arg("doctor")
-        .arg("--summary")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("Unable to run codex doctor: {err}"))?;
-    let started = Instant::now();
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|err| format!("Unable to read codex doctor output: {err}"));
-            }
-            Ok(None) if started.elapsed() > Duration::from_secs(15) => {
-                let _ = child.kill();
-                return Err("codex doctor timed out".to_string());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(err) => return Err(format!("Unable to wait for codex doctor: {err}")),
-        }
-    }
 }
 
 fn to_hex(bytes: &[u8]) -> String {
