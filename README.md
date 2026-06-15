@@ -40,8 +40,28 @@ in Cursor:
 Cursor does not automatically fetch models from a custom Base URL. You must add
 the model name manually.
 
-The app always binds the bridge to `127.0.0.1`; it does not expose the service
-on your LAN or the public internet.
+The app always binds the bridge to `127.0.0.1` by default. For Cursor Agent mode,
+enable **Public Tunnel** in the app and provide your own ngrok authtoken so the
+panel can start a public HTTPS URL for Cursor.
+
+## ngrok Tunnel (Cursor Agent)
+
+Cursor Agent routes requests through Cursor's cloud, which cannot reach
+`127.0.0.1`. To use gpt2cursor with Agent mode:
+
+1. Install [ngrok](https://ngrok.com/download) on the same machine.
+2. In gpt2cursor, enable **Public Tunnel** and paste your ngrok authtoken.
+3. Click **Start**. The app starts the local bridge and an ngrok tunnel.
+4. Copy the **public** Base URL shown in the panel into Cursor Settings.
+5. Paste the gpt2cursor API key and add custom model `gpt2cursor-local`.
+
+Notes:
+
+- Each user needs their own ngrok account and authtoken.
+- Free ngrok URLs may change when the tunnel restarts.
+- The public endpoint is protected by your gpt2cursor API key, but exposing a
+  local Codex bridge to the internet still carries risk. Use only for personal
+  experiments.
 
 ## App Controls
 
@@ -53,6 +73,8 @@ on your LAN or the public internet.
   cumulative tokens for this app session.
 - **Codex Account**: best-effort local CLI status; account quota is shown as
   unavailable when the CLI does not expose a stable quota API.
+- **Public Tunnel**: optional ngrok integration for Cursor Agent; paste authtoken,
+  start the bridge, and copy the public Base URL.
 - **Launch at login**: writes/removes a macOS LaunchAgent for the app.
 
 ## Development

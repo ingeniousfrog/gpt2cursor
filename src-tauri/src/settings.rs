@@ -16,6 +16,10 @@ pub struct AppSettings {
     pub codex_approval: String,
     pub codex_timeout_ms: u64,
     pub launch_at_login: bool,
+    #[serde(default)]
+    pub ngrok_enabled: bool,
+    #[serde(default)]
+    pub ngrok_authtoken: String,
 }
 
 impl Default for AppSettings {
@@ -31,6 +35,8 @@ impl Default for AppSettings {
             codex_approval: "never".to_string(),
             codex_timeout_ms: 120_000,
             launch_at_login: false,
+            ngrok_enabled: false,
+            ngrok_authtoken: String::new(),
         }
     }
 }
@@ -53,6 +59,9 @@ impl AppSettings {
         )?;
         if self.codex_timeout_ms < 1_000 {
             return Err("Codex timeout must be at least 1000 ms".to_string());
+        }
+        if self.ngrok_enabled && self.ngrok_authtoken.trim().is_empty() {
+            return Err("ngrok authtoken is required when tunnel is enabled".to_string());
         }
         Ok(())
     }
@@ -82,7 +91,20 @@ pub fn save_settings(path: &PathBuf, settings: &AppSettings) -> Result<(), Strin
     }
     let raw = serde_json::to_string_pretty(settings)
         .map_err(|err| format!("Unable to encode settings: {err}"))?;
-    fs::write(path, raw).map_err(|err| format!("Unable to save settings: {err}"))
+    fs::write(path, raw).map_err(|err| format!("Unable to save settings: {err}"))?;
+    restrict_settings_permissions(path)
+}
+
+#[cfg(unix)]
+fn restrict_settings_permissions(path: &PathBuf) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|err| format!("Unable to secure settings file permissions: {err}"))
+}
+
+#[cfg(not(unix))]
+fn restrict_settings_permissions(_path: &PathBuf) -> Result<(), String> {
+    Ok(())
 }
 
 pub fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -123,5 +145,15 @@ mod tests {
             ..AppSettings::default()
         };
         assert!(settings.validate().unwrap_err().contains("sandbox"));
+    }
+
+    #[test]
+    fn rejects_ngrok_without_authtoken() {
+        let settings = AppSettings {
+            api_key: "local".to_string(),
+            ngrok_enabled: true,
+            ..AppSettings::default()
+        };
+        assert!(settings.validate().unwrap_err().contains("ngrok authtoken"));
     }
 }

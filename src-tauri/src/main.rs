@@ -3,6 +3,7 @@
 mod bridge;
 mod codex;
 mod launch;
+mod ngrok;
 mod settings;
 mod tray_icon;
 
@@ -11,6 +12,7 @@ use bridge::{
     UsageSnapshot,
 };
 use codex::{list_codex_models, probe_codex_status, CodexAccountStatus, CodexModelOption, RealCodexExecutor};
+use ngrok::{NgrokRuntime, TunnelStatus};
 use serde::{Deserialize, Serialize};
 use settings::{load_settings, save_settings as persist_settings, settings_path, AppSettings};
 use std::{
@@ -24,6 +26,8 @@ use tauri::{AppHandle, Manager, PhysicalPosition, WindowEvent, Wry};
 struct ManagedState {
     settings: Mutex<AppSettings>,
     bridge: Mutex<Option<BridgeRuntime>>,
+    ngrok: Mutex<Option<NgrokRuntime>>,
+    tunnel_error: Mutex<Option<String>>,
     usage: Arc<Mutex<UsageSnapshot>>,
 }
 
@@ -31,6 +35,7 @@ struct ManagedState {
 struct AppViewState {
     settings: AppSettings,
     bridge: BridgeStatus,
+    tunnel: TunnelStatus,
     codex: CodexAccountStatus,
 }
 
@@ -210,7 +215,7 @@ fn start_bridge(
     }
 
     let runtime = start_bridge_server(
-        settings,
+        settings.clone(),
         Arc::clone(&state.usage),
         Arc::new(RealCodexExecutor),
     )?;
@@ -218,6 +223,24 @@ fn start_bridge(
         .bridge
         .lock()
         .map_err(|_| "Bridge state is unavailable".to_string())? = Some(runtime);
+
+    let mut tunnel_error = None;
+    if settings.ngrok_enabled {
+        match ngrok::start_tunnel(settings.port, &settings.ngrok_authtoken) {
+            Ok(runtime) => {
+                *state
+                    .ngrok
+                    .lock()
+                    .map_err(|_| "Tunnel state is unavailable".to_string())? = Some(runtime);
+            }
+            Err(err) => tunnel_error = Some(err),
+        }
+    }
+    *state
+        .tunnel_error
+        .lock()
+        .map_err(|_| "Tunnel state is unavailable".to_string())? = tunnel_error;
+
     app_state(&app, &state)
 }
 
@@ -226,6 +249,19 @@ fn stop_bridge(
     app: AppHandle,
     state: tauri::State<ManagedState>,
 ) -> Result<AppViewState, String> {
+    if let Some(runtime) = state
+        .ngrok
+        .lock()
+        .map_err(|_| "Tunnel state is unavailable".to_string())?
+        .take()
+    {
+        runtime.stop();
+    }
+    *state
+        .tunnel_error
+        .lock()
+        .map_err(|_| "Tunnel state is unavailable".to_string())? = None;
+
     let runtime = state
         .bridge
         .lock()
@@ -277,6 +313,11 @@ async fn list_codex_model_options() -> Result<Vec<CodexModelOption>, String> {
 
 #[tauri::command]
 fn quit_app(app: AppHandle<Wry>, state: tauri::State<ManagedState>) {
+    if let Ok(mut ngrok) = state.ngrok.lock() {
+        if let Some(runtime) = ngrok.take() {
+            runtime.stop();
+        }
+    }
     if let Ok(mut bridge) = state.bridge.lock() {
         if let Some(runtime) = bridge.take() {
             runtime.stop();
@@ -303,6 +344,15 @@ fn app_state(app: &AppHandle, state: &tauri::State<ManagedState>) -> Result<AppV
         .lock()
         .map_err(|_| "Usage state is unavailable".to_string())?
         .clone();
+    let ngrok = state
+        .ngrok
+        .lock()
+        .map_err(|_| "Tunnel state is unavailable".to_string())?;
+    let tunnel_error = state
+        .tunnel_error
+        .lock()
+        .map_err(|_| "Tunnel state is unavailable".to_string())?
+        .clone();
 
     let _ = app;
     Ok(AppViewState {
@@ -313,6 +363,7 @@ fn app_state(app: &AppHandle, state: &tauri::State<ManagedState>) -> Result<AppV
             base_url: base_url(port),
             usage,
         },
+        tunnel: ngrok::tunnel_status(port, ngrok.as_ref(), tunnel_error),
         codex: CodexAccountStatus {
             cli_installed: false,
             authenticated: false,
@@ -339,6 +390,8 @@ fn main() {
             app.manage(ManagedState {
                 settings: Mutex::new(settings),
                 bridge: Mutex::new(None),
+                ngrok: Mutex::new(None),
+                tunnel_error: Mutex::new(None),
                 usage: Arc::new(Mutex::new(UsageSnapshot::default())),
             });
 
@@ -399,7 +452,7 @@ fn toggle_panel(app: &AppHandle<Wry>, position: PhysicalPosition<f64>) {
     }
 
     let panel_width = 440.0;
-    let panel_height = 640.0;
+    let panel_height = 720.0;
     let mut x = (position.x - panel_width / 2.0).max(8.0);
     let mut y = (position.y + 10.0).max(8.0);
 

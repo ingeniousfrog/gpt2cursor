@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "gpt2cursor"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "cocoa",
  "image",

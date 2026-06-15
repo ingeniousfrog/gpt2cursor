@@ -6,6 +6,7 @@ import {
   Clipboard,
   Eye,
   EyeOff,
+  Globe,
   KeyRound,
   Loader2,
   LogOut,
@@ -58,6 +59,16 @@ type AppSettings = {
   codex_approval: string;
   codex_timeout_ms: number;
   launch_at_login: boolean;
+  ngrok_enabled: boolean;
+  ngrok_authtoken: string;
+};
+
+type TunnelStatus = {
+  installed: boolean;
+  running: boolean;
+  local_url: string;
+  public_url: string | null;
+  error: string | null;
 };
 
 type BridgeStatus = {
@@ -83,6 +94,7 @@ type CodexStatus = {
 type AppViewState = {
   settings: AppSettings;
   bridge: BridgeStatus;
+  tunnel: TunnelStatus;
   codex: CodexStatus;
 };
 
@@ -130,6 +142,8 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
     codex_approval: "never",
     codex_timeout_ms: 120000,
     launch_at_login: false,
+    ngrok_enabled: false,
+    ngrok_authtoken: "",
   };
   const running = command === "start_bridge";
   const state: AppViewState = {
@@ -147,6 +161,13 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
         total_usage: { input_tokens: 8840, cached_input_tokens: 1600, output_tokens: 2301, reasoning_output_tokens: 412 },
         last_error: null,
       },
+    },
+    tunnel: {
+      installed: true,
+      running,
+      local_url: "http://127.0.0.1:8787/v1",
+      public_url: running ? "https://preview.ngrok-free.app/v1" : null,
+      error: null,
     },
     codex: {
       cli_installed: true,
@@ -217,6 +238,7 @@ export default function App() {
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [portValidation, setPortValidation] = useState<PortValidation | null>(null);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [ngrokTokenVisible, setNgrokTokenVisible] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [codexRefreshing, setCodexRefreshing] = useState(false);
@@ -271,10 +293,16 @@ export default function App() {
   }, [draft?.port]);
 
   const bridge = state?.bridge;
+  const tunnel = state?.tunnel;
   const settings = draft;
   const usage = bridge?.usage;
-  const canStart = Boolean(settings?.api_key && portValidation?.available !== false);
-  const baseUrl = bridge?.base_url ?? `http://127.0.0.1:${settings?.port ?? 8787}/v1`;
+  const canStart = Boolean(
+    settings?.api_key
+    && portValidation?.available !== false
+    && (!settings.ngrok_enabled || settings.ngrok_authtoken.trim()),
+  );
+  const localBaseUrl = bridge?.base_url ?? tunnel?.local_url ?? `http://127.0.0.1:${settings?.port ?? 8787}/v1`;
+  const cursorBaseUrl = tunnel?.public_url ?? localBaseUrl;
 
   const saveDraft = useCallback(async () => {
     if (!settings) return;
@@ -459,17 +487,75 @@ export default function App() {
         <section className="base-card">
           <div className="min-w-0">
             <div className="label">Cursor Base URL</div>
-            <div className="mt-1 break-all font-mono text-[13px] font-semibold text-sky-700">{baseUrl}</div>
+            <div className="mt-1 break-all font-mono text-[13px] font-semibold text-sky-700">{cursorBaseUrl}</div>
+            {tunnel?.public_url && (
+              <div className="mt-1 break-all font-mono text-[11px] text-slate-500">
+                Local: {localBaseUrl}
+              </div>
+            )}
           </div>
-          <button className="icon-btn" onClick={() => void copy("base", baseUrl)} title="Copy Base URL">
+          <button className="icon-btn" onClick={() => void copy("base", cursorBaseUrl)} title="Copy Base URL">
             {copied === "base" ? <CheckCircle2 className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
           </button>
         </section>
 
         <section className="soft-card p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Globe className="h-4 w-4 text-sky-500" />
+              <span className="label">Public Tunnel</span>
+            </div>
+            <button
+              className="ghost-btn h-8 px-2.5 text-xs"
+              onClick={() => updateDraft("ngrok_enabled", !settings.ngrok_enabled)}
+              disabled={running}
+            >
+              {settings.ngrok_enabled ? <ToggleRight className="h-4 w-4 text-sky-500" /> : <ToggleLeft className="h-4 w-4" />}
+              {settings.ngrok_enabled ? "Enabled" : "Disabled"}
+            </button>
+          </div>
+          <p className="text-xs leading-relaxed text-slate-500">
+            Expose the local bridge through ngrok so Cursor Agent can reach your endpoint from the cloud.
+          </p>
+          <div className="mt-3">
+            <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">ngrok Authtoken</span>
+            <div className="flex gap-2">
+              <input
+                className="field min-w-0 font-mono"
+                type={ngrokTokenVisible ? "text" : "password"}
+                value={settings.ngrok_authtoken}
+                placeholder="Paste your ngrok authtoken"
+                disabled={running}
+                onChange={(event) => updateDraft("ngrok_authtoken", event.target.value)}
+              />
+              <button
+                className="icon-btn shrink-0"
+                onClick={() => setNgrokTokenVisible((value) => !value)}
+                title={ngrokTokenVisible ? "Hide authtoken" : "Show authtoken"}
+              >
+                {ngrokTokenVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <StatusChip label="ngrok" ok={tunnel?.installed ?? false} />
+            <StatusChip label="Tunnel" ok={tunnel?.running ?? false} />
+          </div>
+          {settings.ngrok_enabled && !tunnel?.installed && (
+            <p className="mt-2 text-xs text-amber-700">Install ngrok from ngrok.com/download before starting.</p>
+          )}
+          {tunnel?.error && (
+            <p className="mt-2 text-xs text-rose-600">{tunnel.error}</p>
+          )}
+          {tunnel?.public_url && (
+            <p className="mt-2 text-xs text-emerald-700">Public URL is ready. Copy the Base URL above into Cursor.</p>
+          )}
+        </section>
+
+        <section className="soft-card p-3">
           <div className="label">Cursor Setup</div>
           <ol className="mt-2 space-y-1.5 text-xs leading-relaxed text-slate-600">
-            <li>1. In Cursor Settings → Models, enable <span className="font-semibold text-slate-800">Override OpenAI Base URL</span> and paste the Base URL above.</li>
+            <li>1. In Cursor Settings → Models, enable <span className="font-semibold text-slate-800">Override OpenAI Base URL</span> and paste the {settings.ngrok_enabled ? "public" : "local"} Base URL above.</li>
             <li>2. Paste the API Key from this app into <span className="font-semibold text-slate-800">OpenAI API Key</span>.</li>
             <li>3. Click <span className="font-semibold text-slate-800">+ Add Custom Model</span> and add <span className="font-mono font-semibold text-sky-700">{CURSOR_MODEL}</span>.</li>
           </ol>
