@@ -100,7 +100,7 @@ The Rust tests bind temporary localhost ports for integration coverage.
 
 Release builds are adhoc-signed for local use. After downloading from GitHub:
 
-1. Open the DMG and drag **gpt2cursor** to Applications.
+1. Open the DMG and drag **gpt2cursor** onto the **Applications** folder shortcut.
 2. On first launch, if macOS blocks the app, open **System Settings → Privacy & Security** and click **Open Anyway**, or right-click the app and choose **Open**.
 3. If you still see **“gpt2cursor is damaged”**, remove quarantine attributes:
 
