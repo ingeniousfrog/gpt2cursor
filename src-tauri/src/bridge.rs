@@ -1,12 +1,15 @@
 use crate::{
-    codex::{format_prompt, ChatMessage, CodexExecutor, TokenUsage},
+    codex::{
+        format_prompt, run_codex_in_pty_streaming, trim_messages_for_codex, ChatMessage,
+        CodexExecutor, CodexStreamEvent, TokenUsage,
+    },
     settings::AppSettings,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -18,7 +21,14 @@ use std::{
 
 const HOST: &str = "127.0.0.1";
 const MAX_BODY_BYTES: usize = 1_048_576;
+const MAX_RECENT_LOGS: usize = 40;
 pub const CURSOR_MODEL_ID: &str = "gpt2cursor-local";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriteOutcome {
+    Ok,
+    ClientDisconnected,
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct UsageSnapshot {
@@ -29,6 +39,8 @@ pub struct UsageSnapshot {
     pub last_usage: TokenUsage,
     pub total_usage: TokenUsage,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub recent_logs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -46,6 +58,14 @@ pub struct BridgeRuntime {
 }
 
 impl BridgeRuntime {
+    pub fn is_alive(&self) -> bool {
+        !self
+            .join
+            .as_ref()
+            .map(|handle| handle.is_finished())
+            .unwrap_or(true)
+    }
+
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = TcpStream::connect((HOST, self.port));
@@ -64,25 +84,34 @@ pub fn is_port_available(port: u16) -> bool {
 }
 
 pub fn start_bridge(
-    settings: AppSettings,
+    settings: Arc<Mutex<AppSettings>>,
     usage: Arc<Mutex<UsageSnapshot>>,
     executor: Arc<dyn CodexExecutor>,
 ) -> Result<BridgeRuntime, String> {
-    settings.validate()?;
-    let listener = TcpListener::bind((HOST, settings.port))
-        .map_err(|err| format!("Port {} is not available: {err}", settings.port))?;
+    let port = {
+        let settings_guard = settings
+            .lock()
+            .map_err(|_| "Settings state is unavailable".to_string())?;
+        settings_guard.validate()?;
+        settings_guard.port
+    };
+    let listener = TcpListener::bind((HOST, port))
+        .map_err(|err| format!("Port {port} is not available: {err}"))?;
     listener
         .set_nonblocking(true)
         .map_err(|err| format!("Unable to configure listener: {err}"))?;
 
-    let port = settings.port;
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
+    let listener_settings = Arc::clone(&settings);
     let join = thread::spawn(move || {
         while !thread_stop.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let request_settings = settings.clone();
+                    let request_settings = match listener_settings.lock() {
+                        Ok(settings_guard) => settings_guard.clone(),
+                        Err(_) => continue,
+                    };
                     let request_usage = Arc::clone(&usage);
                     let request_executor = Arc::clone(&executor);
                     thread::spawn(move || {
@@ -92,7 +121,11 @@ pub fn start_bridge(
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(25));
                 }
-                Err(_) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => {
+                    eprintln!("bridge accept error: {err}");
+                    thread::sleep(Duration::from_millis(100));
+                }
             }
         }
     });
@@ -110,6 +143,7 @@ fn handle_stream(
     usage: Arc<Mutex<UsageSnapshot>>,
     executor: Arc<dyn CodexExecutor>,
 ) {
+    let _ = stream.set_nonblocking(false);
     let started = Instant::now();
     increment_active(&usage);
     let result = handle_request(
@@ -129,6 +163,12 @@ fn handle_request(
     executor: Arc<dyn CodexExecutor>,
 ) -> Result<(), String> {
     let request = read_request(stream)?;
+    let route = normalize_route(&request.method, &request.path);
+    append_log(
+        &usage,
+        format!("{} {} ({})", request.method, request.path, route.label()),
+    );
+
     if !is_authorized(&request.headers, &settings.api_key) {
         write_json(
             stream,
@@ -138,13 +178,11 @@ fn handle_request(
         return Err("authentication failed".to_string());
     }
 
-    match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/healthz") => write_json(stream, 200, json!({"ok":true})),
-        ("GET", "/v1/models") => write_json(stream, 200, models_payload()),
-        ("POST", "/v1/chat/completions") => {
-            handle_chat(stream, settings, usage, executor, request.body)
-        }
-        _ => write_json(
+    match route {
+        Route::Healthz => write_json(stream, 200, json!({"ok":true})),
+        Route::Models => write_json(stream, 200, models_payload()),
+        Route::ChatCompletions => handle_chat(stream, settings, usage, executor, request.body),
+        Route::NotFound => write_json(
             stream,
             404,
             json!({"error":{"message":"Route not found","type":"not_found"}}),
@@ -173,6 +211,7 @@ fn handle_chat(
     let chat = match parse_chat_request(&input) {
         Ok(value) => value,
         Err(message) => {
+            append_log(&usage, format!("chat parse error: {message}"));
             write_json(
                 stream,
                 400,
@@ -181,10 +220,44 @@ fn handle_chat(
             return Err("invalid chat request".to_string());
         }
     };
-    let prompt = format_prompt(&chat.messages);
+    append_log(
+        &usage,
+        format!(
+            "chat {} stream={} messages={}",
+            chat.model,
+            chat.stream,
+            chat.messages.len()
+        ),
+    );
+
+    let (prompt, prompt_meta) = build_codex_prompt(&chat.messages, settings);
+    append_log(
+        &usage,
+        format!(
+            "codex exec via pty, {} chars, {} msgs, timeout {}s",
+            prompt_meta.prompt_chars,
+            prompt_meta.sent_messages,
+            settings.codex_timeout_ms / 1000
+        ),
+    );
+    if prompt_meta.original_messages > prompt_meta.sent_messages {
+        append_log(
+            &usage,
+            format!(
+                "trimmed history {} -> {} messages for codex",
+                prompt_meta.original_messages, prompt_meta.sent_messages
+            ),
+        );
+    }
+
+    if chat.stream {
+        return handle_chat_streaming(stream, settings, usage, executor, &chat, &prompt);
+    }
+
     let codex = match executor.execute(settings, &prompt) {
         Ok(value) => value,
         Err(message) => {
+            append_log(&usage, format!("codex failed: {message}"));
             write_json(
                 stream,
                 502,
@@ -195,46 +268,191 @@ fn handle_chat(
     };
     let created = now_epoch_seconds();
 
-    if chat.stream {
-        let result = write_sse(
-            stream,
-            &settings.model,
-            &codex.text,
-            created,
-            codex.usage.clone(),
-            codex.duration_ms,
-        );
-        record_success(&usage, &codex.usage, codex.duration_ms);
-        result
-    } else {
-        let result = write_json(
-            stream,
-            200,
-            json!({
-                "id": format!("chatcmpl-{created}"),
-                "object":"chat.completion",
-                "created": created,
-                "model": chat.model,
-                "choices":[{
-                    "index":0,
-                    "message":{"role":"assistant","content":codex.text},
-                    "finish_reason":"stop"
-                }],
-                "usage": {
-                    "prompt_tokens": codex.usage.input_tokens,
-                    "completion_tokens": codex.usage.output_tokens,
-                    "total_tokens": codex.usage.input_tokens + codex.usage.output_tokens
-                },
-                "gpt2cursor": {
-                    "duration_ms": codex.duration_ms,
-                    "reasoning_output_tokens": codex.usage.reasoning_output_tokens,
-                    "cached_input_tokens": codex.usage.cached_input_tokens
-                }
-            }),
-        );
-        record_success(&usage, &codex.usage, codex.duration_ms);
-        result
+    let result = write_json(
+        stream,
+        200,
+        json!({
+            "id": format!("chatcmpl-{created}"),
+            "object":"chat.completion",
+            "created": created,
+            "model": chat.model,
+            "choices":[{
+                "index":0,
+                "message":{"role":"assistant","content":codex.text},
+                "finish_reason":"stop"
+            }],
+            "usage": {
+                "prompt_tokens": codex.usage.input_tokens,
+                "completion_tokens": codex.usage.output_tokens,
+                "total_tokens": codex.usage.input_tokens + codex.usage.output_tokens
+            },
+            "gpt2cursor": {
+                "duration_ms": codex.duration_ms,
+                "reasoning_output_tokens": codex.usage.reasoning_output_tokens,
+                "cached_input_tokens": codex.usage.cached_input_tokens
+            }
+        }),
+    );
+    record_success(&usage, &codex.usage, codex.duration_ms);
+    append_log(
+        &usage,
+        format!(
+            "chat ok {}ms out={} tok",
+            codex.duration_ms, codex.usage.output_tokens
+        ),
+    );
+    result
+}
+
+fn handle_chat_streaming(
+    stream: &mut TcpStream,
+    settings: &AppSettings,
+    usage: Arc<Mutex<UsageSnapshot>>,
+    _executor: Arc<dyn CodexExecutor>,
+    chat: &ChatRequest,
+    prompt: &str,
+) -> Result<(), String> {
+    let created = now_epoch_seconds();
+    let id = format!("chatcmpl-{created}");
+    let model = chat.model.clone();
+
+    if matches!(start_sse(stream)?, WriteOutcome::ClientDisconnected) {
+        append_log(&usage, "client disconnected before stream started".to_string());
+        return Ok(());
     }
+    if matches!(
+        write_sse_data(
+            stream,
+            &json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": null
+                }]
+            }),
+        )?,
+        WriteOutcome::ClientDisconnected
+    ) {
+        append_log(&usage, "client disconnected before codex started".to_string());
+        return Ok(());
+    }
+
+    let codex = match run_codex_in_pty_streaming(settings, prompt, |event| {
+        match event {
+            CodexStreamEvent::TextDelta(delta) => match write_sse_data(
+                stream,
+                &json!({
+                    "id": id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": delta},
+                        "finish_reason": null
+                    }]
+                }),
+            )? {
+                WriteOutcome::Ok => Ok(()),
+                WriteOutcome::ClientDisconnected => Err("client disconnected".to_string()),
+            },
+            CodexStreamEvent::Keepalive => match write_sse_keepalive(stream)? {
+                WriteOutcome::Ok => Ok(()),
+                WriteOutcome::ClientDisconnected => Err("client disconnected".to_string()),
+            },
+        }
+    }) {
+        Ok(value) => value,
+        Err(message) if message == "client disconnected" => {
+            append_log(&usage, "client disconnected during codex stream".to_string());
+            return Ok(());
+        }
+        Err(message) => {
+            append_log(&usage, format!("codex failed (stream): {message}"));
+            if try_write_stream_error(stream, &id, created, &model, &message)? {
+                return Ok(());
+            }
+            return Err("codex failed".to_string());
+        }
+    };
+
+    if matches!(
+        write_sse_finish(stream, &id, created, &model)?,
+        WriteOutcome::ClientDisconnected
+    ) {
+        append_log(
+            &usage,
+            format!(
+                "client disconnected after stream finished ({}ms)",
+                codex.duration_ms
+            ),
+        );
+        record_success(&usage, &codex.usage, codex.duration_ms);
+        return Ok(());
+    }
+    record_success(&usage, &codex.usage, codex.duration_ms);
+    append_log(
+        &usage,
+        format!(
+            "stream ok {}ms out={} tok",
+            codex.duration_ms, codex.usage.output_tokens
+        ),
+    );
+    Ok(())
+}
+
+fn try_write_stream_error(
+    stream: &mut TcpStream,
+    id: &str,
+    created: u64,
+    model: &str,
+    message: &str,
+) -> Result<bool, String> {
+    if matches!(
+        write_sse_data(
+            stream,
+            &json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": format!("Codex CLI failed: {message}")},
+                    "finish_reason": null
+                }]
+            }),
+        )?,
+        WriteOutcome::ClientDisconnected
+    ) {
+        return Ok(true);
+    }
+    Ok(matches!(
+        write_sse_finish(stream, id, created, model)?,
+        WriteOutcome::ClientDisconnected
+    ))
+}
+
+struct PromptMeta {
+    original_messages: usize,
+    sent_messages: usize,
+    prompt_chars: usize,
+}
+
+fn build_codex_prompt(messages: &[ChatMessage], settings: &AppSettings) -> (String, PromptMeta) {
+    let (trimmed, original_messages) =
+        trim_messages_for_codex(messages, settings.codex_max_messages);
+    let prompt = format_prompt(&trimmed);
+    let meta = PromptMeta {
+        original_messages,
+        sent_messages: trimmed.len(),
+        prompt_chars: prompt.len(),
+    };
+    (prompt, meta)
 }
 
 #[derive(Debug)]
@@ -254,14 +472,17 @@ struct ChatRequest {
 
 fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_nonblocking(false)
+        .map_err(|err| format!("Unable to configure socket: {err}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|err| format!("Unable to set read timeout: {err}"))?;
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 2048];
     let header_end;
 
     loop {
-        let count = stream.read(&mut chunk).map_err(|err| format!("Unable to read request: {err}"))?;
+        let count = read_with_retry(stream, &mut chunk, "request")?;
         if count == 0 {
             return Err("Request ended before headers".to_string());
         }
@@ -297,11 +518,18 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     let body_start = header_end + 4;
     let mut body = buffer.get(body_start..).unwrap_or_default().to_vec();
     while body.len() < content_length {
-        let count = stream.read(&mut chunk).map_err(|err| format!("Unable to read body: {err}"))?;
+        let count = read_with_retry(stream, &mut chunk, "body")?;
         if count == 0 {
-            break;
+            return Err(format!(
+                "Request body incomplete: received {} of {} bytes",
+                body.len(),
+                content_length
+            ));
         }
         body.extend_from_slice(&chunk[..count]);
+        if body.len() > MAX_BODY_BYTES {
+            return Err("Request body is too large".to_string());
+        }
     }
     body.truncate(content_length);
 
@@ -320,19 +548,27 @@ fn parse_chat_request(input: &Value) -> Result<ChatRequest, String> {
         .unwrap_or(CURSOR_MODEL_ID)
         .to_string();
     let stream = input.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let messages = input
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "messages must include at least one message".to_string())?;
-    if messages.is_empty() {
+    let raw_messages = if let Some(messages) = input.get("messages").and_then(Value::as_array) {
+        messages.clone()
+    } else if let Some(items) = input.get("input").and_then(Value::as_array) {
+        convert_input_to_messages(items)?
+    } else {
+        return Err("messages must include at least one message".to_string());
+    };
+    if raw_messages.is_empty() {
         return Err("messages must include at least one message".to_string());
     }
 
-    let parsed = messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| parse_message(index, message))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut parsed = Vec::new();
+    for (index, message) in raw_messages.iter().enumerate() {
+        let parsed_message = parse_message(index, message);
+        if !parsed_message.content.trim().is_empty() {
+            parsed.push(parsed_message);
+        }
+    }
+    if parsed.is_empty() {
+        return Err("messages must include at least one message with text".to_string());
+    }
     Ok(ChatRequest {
         model,
         messages: parsed,
@@ -340,27 +576,230 @@ fn parse_chat_request(input: &Value) -> Result<ChatRequest, String> {
     })
 }
 
-fn parse_message(index: usize, message: &Value) -> Result<ChatMessage, String> {
+fn convert_input_to_messages(items: &[Value]) -> Result<Vec<Value>, String> {
+    let mut messages = Vec::new();
+    for item in items {
+        let item_type = item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match item_type {
+            "message" => {
+                let role = item
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("user");
+                let content = item
+                    .get("content")
+                    .cloned()
+                    .or_else(|| item.get("text").cloned())
+                    .unwrap_or(Value::String(String::new()));
+                messages.push(json!({"role": role, "content": content}));
+            }
+            "function_call" | "tool_call" | "tool_use" => {
+                let name = item
+                    .get("name")
+                    .or_else(|| item.get("tool_name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool");
+                let arguments = item
+                    .get("arguments")
+                    .or_else(|| item.get("input"))
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "{}".to_string());
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": format!("[tool_call {name}]: {arguments}")
+                }));
+            }
+            "function_call_output" | "tool_result" => {
+                let content = item
+                    .get("output")
+                    .or_else(|| item.get("content"))
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| item.to_string());
+                messages.push(json!({
+                    "role": "tool",
+                    "content": content
+                }));
+            }
+            _ => {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    messages.push(json!({"role":"user","content": text}));
+                }
+            }
+        }
+    }
+    Ok(messages)
+}
+
+fn parse_message(index: usize, message: &Value) -> ChatMessage {
     let role = message
         .get("role")
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("messages[{index}].role must be a string"))?;
-    let content = match message.get("content") {
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => return Err(format!("messages[{index}].content must include text")),
+        .unwrap_or("unknown")
+        .to_string();
+    let content = if let Some(content) = extract_message_content(message) {
+        content
+    } else if is_explicitly_empty_content(message) {
+        String::new()
+    } else {
+        serde_json::to_string(message)
+            .map(|serialized| format!("[message {index}]: {serialized}"))
+            .unwrap_or_default()
     };
-    if content.trim().is_empty() {
-        return Err(format!("messages[{index}].content must include text"));
+    ChatMessage { role, content }
+}
+
+fn is_explicitly_empty_content(message: &Value) -> bool {
+    match message.get("content") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) => text.trim().is_empty(),
+        Some(Value::Array(parts)) => parts.is_empty(),
+        _ => false,
     }
-    Ok(ChatMessage {
-        role: role.to_string(),
-        content,
-    })
+}
+
+fn extract_message_content(message: &Value) -> Option<String> {
+    if let Some(content) = message.get("content") {
+        if let Some(text) = extract_content_value(content) {
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+    }
+
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        if !tool_calls.is_empty() {
+            return Some(format_tool_calls(tool_calls));
+        }
+    }
+
+    if let Some(function_call) = message.get("function_call") {
+        if !function_call.is_null() {
+            return Some(format_function_call(function_call));
+        }
+    }
+
+    if message.get("role").and_then(Value::as_str) == Some("tool") {
+        let name = message
+            .get("name")
+            .or_else(|| message.get("tool_call_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        if let Some(content) = message
+            .get("content")
+            .and_then(extract_content_value)
+            .filter(|text| !text.trim().is_empty())
+        {
+            return Some(format!("[{name}]: {content}"));
+        }
+    }
+
+    message
+        .get("refusal")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| text.to_string())
+}
+
+fn extract_content_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Null => None,
+        Value::Array(parts) => {
+            let texts = parts
+                .iter()
+                .filter_map(extract_content_part)
+                .collect::<Vec<_>>();
+            if texts.is_empty() {
+                None
+            } else {
+                Some(texts.join("\n"))
+            }
+        }
+        Value::Object(_) => extract_content_part(value),
+        _ => None,
+    }
+}
+
+fn extract_content_part(part: &Value) -> Option<String> {
+    for key in ["text", "input_text", "output_text", "content"] {
+        if let Some(text) = part.get(key).and_then(Value::as_str) {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+
+    let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
+    match part_type {
+        "text" | "input_text" | "output_text" => part
+            .get("text")
+            .or_else(|| part.get("input_text"))
+            .or_else(|| part.get("output_text"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| text.to_string()),
+        "image_url" | "image" | "input_image" => Some("[image]".to_string()),
+        "tool_use" | "tool_call" | "function_call" => {
+            let name = part
+                .get("name")
+                .or_else(|| part.get("tool_name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            let input = part
+                .get("input")
+                .or_else(|| part.get("arguments"))
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            Some(format!("[tool_call {name}]: {input}"))
+        }
+        "tool_result" | "function_call_output" => {
+            let content = part
+                .get("content")
+                .or_else(|| part.get("output"))
+                .and_then(extract_content_value)
+                .unwrap_or_else(|| part.to_string());
+            Some(format!("[tool_result]: {content}"))
+        }
+        _ => None,
+    }
+}
+
+fn format_tool_calls(tool_calls: &[Value]) -> String {
+    tool_calls
+        .iter()
+        .map(|call| {
+            let name = call
+                .get("function")
+                .and_then(|value| value.get("name"))
+                .or_else(|| call.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            let arguments = call
+                .get("function")
+                .and_then(|value| value.get("arguments"))
+                .or_else(|| call.get("arguments"))
+                .or_else(|| call.get("input"))
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "{}".to_string());
+            format!("[tool_call {name}]: {arguments}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_function_call(function_call: &Value) -> String {
+    let name = function_call
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("function");
+    let arguments = function_call
+        .get("arguments")
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "{}".to_string());
+    format!("[function_call {name}]: {arguments}")
 }
 
 fn models_payload() -> Value {
@@ -398,35 +837,55 @@ fn write_json(stream: &mut TcpStream, status: u16, payload: Value) -> Result<(),
     write_response(stream, status, "application/json; charset=utf-8", body.as_bytes())
 }
 
-fn write_sse(
+fn start_sse(stream: &mut TcpStream) -> Result<WriteOutcome, String> {
+    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream; charset=utf-8\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n";
+    write_all(stream, head.as_bytes(), "start SSE stream")
+}
+
+fn write_sse_keepalive(stream: &mut TcpStream) -> Result<WriteOutcome, String> {
+    write_all(stream, b": keepalive\n\n", "write SSE keepalive")
+}
+
+fn write_sse_data(stream: &mut TcpStream, payload: &Value) -> Result<WriteOutcome, String> {
+    let body = format!("data: {payload}\n\n");
+    write_all(stream, body.as_bytes(), "write SSE chunk")
+}
+
+fn write_sse_finish(
     stream: &mut TcpStream,
-    model: &str,
-    content: &str,
+    id: &str,
     created: u64,
-    usage: TokenUsage,
-    duration_ms: u64,
-) -> Result<(), String> {
-    let chunk = json!({
-        "id": format!("chatcmpl-{created}"),
-        "object":"chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices":[{
-            "index":0,
-            "delta":{"role":"assistant","content":content},
-            "finish_reason": null
-        }],
-        "gpt2cursor": {"usage": usage, "duration_ms": duration_ms}
-    });
-    let done = json!({
-        "id": format!("chatcmpl-{created}"),
-        "object":"chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices":[{"index":0,"delta":{},"finish_reason":"stop"}]
-    });
-    let body = format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n");
-    write_response(stream, 200, "text/event-stream; charset=utf-8", body.as_bytes())
+    model: &str,
+) -> Result<WriteOutcome, String> {
+    write_sse_data(
+        stream,
+        &json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        }),
+    )?;
+    write_all(stream, b"data: [DONE]\n\n", "write SSE done marker")
+}
+
+fn write_all(stream: &mut TcpStream, bytes: &[u8], action: &str) -> Result<WriteOutcome, String> {
+    match stream.write_all(bytes) {
+        Ok(()) => Ok(WriteOutcome::Ok),
+        Err(err) if is_client_disconnect(&err) => Ok(WriteOutcome::ClientDisconnected),
+        Err(err) => Err(format!("Unable to {action}: {err}")),
+    }
+}
+
+fn is_client_disconnect(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::NotConnected
+    )
 }
 
 fn write_response(
@@ -450,7 +909,13 @@ fn write_response(
     stream
         .write_all(head.as_bytes())
         .and_then(|_| stream.write_all(body))
-        .map_err(|err| format!("Unable to write response: {err}"))
+        .map_err(|err| {
+            if is_client_disconnect(&err) {
+                return String::new();
+            }
+            format!("Unable to write response: {err}")
+        })?;
+    Ok(())
 }
 
 fn increment_active(usage: &Arc<Mutex<UsageSnapshot>>) {
@@ -465,7 +930,7 @@ fn decrement_active(usage: &Arc<Mutex<UsageSnapshot>>, duration_ms: u64, error: 
         snapshot.active_requests = snapshot.active_requests.saturating_sub(1);
         snapshot.last_duration_ms = duration_ms;
         snapshot.total_duration_ms += duration_ms;
-        snapshot.last_error = error;
+        snapshot.last_error = error.filter(|message| !message.is_empty());
     }
 }
 
@@ -473,10 +938,87 @@ pub fn record_success(usage: &Arc<Mutex<UsageSnapshot>>, token_usage: &TokenUsag
     if let Ok(mut snapshot) = usage.lock() {
         snapshot.last_duration_ms = duration_ms;
         snapshot.last_usage = token_usage.clone();
+        snapshot.last_error = None;
         snapshot.total_usage.input_tokens += token_usage.input_tokens;
         snapshot.total_usage.cached_input_tokens += token_usage.cached_input_tokens;
         snapshot.total_usage.output_tokens += token_usage.output_tokens;
         snapshot.total_usage.reasoning_output_tokens += token_usage.reasoning_output_tokens;
+    }
+}
+
+pub fn append_bridge_log(usage: &Arc<Mutex<UsageSnapshot>>, line: impl Into<String>) {
+    append_log(usage, line.into());
+}
+
+fn append_log(usage: &Arc<Mutex<UsageSnapshot>>, line: String) {
+    let stamped = format!("{} {}", format_log_timestamp(), line);
+    eprintln!("[gpt2cursor] {stamped}");
+    if let Ok(mut snapshot) = usage.lock() {
+        snapshot.recent_logs.push(stamped);
+        if snapshot.recent_logs.len() > MAX_RECENT_LOGS {
+            let overflow = snapshot.recent_logs.len() - MAX_RECENT_LOGS;
+            snapshot.recent_logs.drain(0..overflow);
+        }
+    }
+}
+
+fn format_log_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let hours = (seconds / 3600) % 24;
+    let minutes = (seconds / 60) % 60;
+    let secs = seconds % 60;
+    format!("{hours:02}:{minutes:02}:{secs:02}")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Route {
+    Healthz,
+    Models,
+    ChatCompletions,
+    NotFound,
+}
+
+impl Route {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Healthz => "healthz",
+            Self::Models => "models",
+            Self::ChatCompletions => "chat",
+            Self::NotFound => "404",
+        }
+    }
+}
+
+fn normalize_route(method: &str, path: &str) -> Route {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    match (method, path) {
+        ("GET", "/healthz") => Route::Healthz,
+        ("GET", "/v1/models") | ("GET", "/models") => Route::Models,
+        ("POST", "/v1/chat/completions") | ("POST", "/chat/completions") => Route::ChatCompletions,
+        _ => Route::NotFound,
+    }
+}
+
+fn read_with_retry(stream: &mut TcpStream, chunk: &mut [u8], phase: &str) -> Result<usize, String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match stream.read(chunk) {
+            Ok(count) => return Ok(count),
+            Err(err) if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::Interrupted => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "Timed out while reading {phase}: {err}"
+                    ));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => {
+                return Err(format!("Unable to read {phase}: {err}"));
+            }
+        }
     }
 }
 
@@ -547,6 +1089,84 @@ mod tests {
     }
 
     #[test]
+    fn parses_assistant_tool_calls_without_content() {
+        let input = json!({
+            "model":"gpt2cursor-local",
+            "messages":[
+                {"role":"user","content":"read file"},
+                {
+                    "role":"assistant",
+                    "content": null,
+                    "tool_calls":[{
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"Read","arguments":"{\"path\":\"main.rs\"}"}
+                    }]
+                }
+            ]
+        });
+        let chat = parse_chat_request(&input).unwrap();
+        assert_eq!(chat.messages.len(), 2);
+        assert!(chat.messages[1].content.contains("[tool_call Read]"));
+    }
+
+    #[test]
+    fn parses_tool_role_messages() {
+        let input = json!({
+            "model":"gpt2cursor-local",
+            "messages":[
+                {"role":"user","content":"run"},
+                {
+                    "role":"tool",
+                    "tool_call_id":"call_1",
+                    "name":"Shell",
+                    "content":"done"
+                }
+            ]
+        });
+        let chat = parse_chat_request(&input).unwrap();
+        assert_eq!(chat.messages[1].content, "done");
+    }
+
+    #[test]
+    fn parses_input_text_content_parts() {
+        let input = json!({
+            "model":"gpt2cursor-local",
+            "messages":[{
+                "role":"user",
+                "content":[{"type":"input_text","text":"hello from cursor"}]
+            }]
+        });
+        let chat = parse_chat_request(&input).unwrap();
+        assert_eq!(chat.messages[0].content, "hello from cursor");
+    }
+
+    #[test]
+    fn skips_empty_assistant_messages() {
+        let input = json!({
+            "model":"gpt2cursor-local",
+            "messages":[
+                {"role":"user","content":"hello"},
+                {"role":"assistant","content":""}
+            ]
+        });
+        let chat = parse_chat_request(&input).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+    }
+
+    #[test]
+    fn parses_responses_api_input_field() {
+        let input = json!({
+            "model":"gpt2cursor-local",
+            "input":[
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}
+            ]
+        });
+        let chat = parse_chat_request(&input).unwrap();
+        assert_eq!(chat.messages[0].content, "hello");
+    }
+
+    #[test]
     fn detects_available_ephemeral_port() {
         assert!(is_port_available(0));
     }
@@ -562,7 +1182,7 @@ mod tests {
             ..AppSettings::default()
         };
         let usage = Arc::new(Mutex::new(UsageSnapshot::default()));
-        let runtime = start_bridge(settings, usage, Arc::new(MockExecutor)).unwrap();
+        let runtime = start_bridge(Arc::new(Mutex::new(settings)), usage, Arc::new(MockExecutor)).unwrap();
         runtime.stop();
     }
 
@@ -637,7 +1257,7 @@ mod tests {
             ..AppSettings::default()
         };
         let usage = Arc::new(Mutex::new(UsageSnapshot::default()));
-        let runtime = start_bridge(settings, Arc::clone(&usage), executor).unwrap();
+        let runtime = start_bridge(Arc::new(Mutex::new(settings)), Arc::clone(&usage), executor).unwrap();
         thread::sleep(Duration::from_millis(60));
         (runtime, port, usage)
     }

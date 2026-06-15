@@ -3,6 +3,7 @@ import {
   Activity,
   CheckCircle2,
   ChevronDown,
+  CircleHelp,
   Clipboard,
   Eye,
   EyeOff,
@@ -17,8 +18,7 @@ import {
   SlidersHorizontal,
   ToggleLeft,
   ToggleRight,
-  Wifi,
-  WifiOff,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import appIcon from "../src-tauri/icons/icon.png";
@@ -26,6 +26,7 @@ import appIcon from "../src-tauri/icons/icon.png";
 declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
+    __TAURI__?: unknown;
   }
 }
 
@@ -46,6 +47,7 @@ type UsageSnapshot = {
   last_usage: TokenUsage;
   total_usage: TokenUsage;
   last_error: string | null;
+  recent_logs: string[];
 };
 
 type AppSettings = {
@@ -58,6 +60,7 @@ type AppSettings = {
   codex_sandbox: string;
   codex_approval: string;
   codex_timeout_ms: number;
+  codex_max_messages: number;
   launch_at_login: boolean;
   ngrok_enabled: boolean;
   ngrok_authtoken: string;
@@ -65,6 +68,7 @@ type AppSettings = {
 
 type TunnelStatus = {
   installed: boolean;
+  configured: boolean;
   running: boolean;
   local_url: string;
   public_url: string | null;
@@ -121,17 +125,45 @@ const profileOptions = [
   { value: "personal", label: "personal" },
 ];
 
-const isTauri = () => typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
+let mockSettings: AppSettings | null = null;
+let mockBridgeRunning = false;
+let tauriInvokeAvailable: boolean | null = null;
+
+const isTauri = () =>
+  typeof window !== "undefined"
+  && Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__);
+
+async function probeTauriInvoke(): Promise<boolean> {
+  if (tauriInvokeAvailable !== null) {
+    return tauriInvokeAvailable;
+  }
+  if (isTauri()) {
+    tauriInvokeAvailable = true;
+    return true;
+  }
+  try {
+    await invoke("get_app_state");
+    tauriInvokeAvailable = true;
+    return true;
+  } catch {
+    tauriInvokeAvailable = false;
+    return false;
+  }
+}
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauri() && import.meta.env.DEV) {
+  const canInvoke = await probeTauriInvoke();
+  if (canInvoke) {
+    return invoke<T>(command, args);
+  }
+  if (import.meta.env.DEV) {
     return mockCommand<T>(command, args);
   }
-  return invoke<T>(command, args);
+  throw new Error("Tauri IPC is not available");
 }
 
 async function mockCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  const settings: AppSettings = {
+  const defaults: AppSettings = {
     port: 8787,
     api_key: "g2c_preview_5db6f88baf29d2c8",
     model: CURSOR_MODEL,
@@ -140,18 +172,34 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
     codex_profile: "",
     codex_sandbox: "read-only",
     codex_approval: "never",
-    codex_timeout_ms: 120000,
+    codex_timeout_ms: 300000,
+    codex_max_messages: 12,
     launch_at_login: false,
     ngrok_enabled: false,
     ngrok_authtoken: "",
   };
-  const running = command === "start_bridge";
+  const settings = mockSettings ?? defaults;
+
+  if (command === "save_settings" && args?.input && typeof args.input === "object") {
+    const input = args.input as { settings?: AppSettings };
+    mockSettings = input.settings ?? settings;
+  }
+
+  const effective = mockSettings ?? settings;
+  const running = command === "start_bridge" || (command === "get_app_state" && mockBridgeRunning);
+  if (command === "start_bridge") {
+    mockBridgeRunning = true;
+  }
+  if (command === "stop_bridge") {
+    mockBridgeRunning = false;
+  }
+
   const state: AppViewState = {
-    settings,
+    settings: effective,
     bridge: {
-      running,
-      port: settings.port,
-      base_url: "http://127.0.0.1:8787/v1",
+      running: command === "get_app_state" ? mockBridgeRunning : running,
+      port: effective.port,
+      base_url: `http://127.0.0.1:${effective.port}/v1`,
       usage: {
         request_count: running ? 18 : 0,
         active_requests: running ? 1 : 0,
@@ -160,20 +208,25 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
         last_usage: { input_tokens: 812, cached_input_tokens: 128, output_tokens: 244, reasoning_output_tokens: 36 },
         total_usage: { input_tokens: 8840, cached_input_tokens: 1600, output_tokens: 2301, reasoning_output_tokens: 412 },
         last_error: null,
+        recent_logs: running ? ["12:01:02 bridge started", "12:01:18 POST /v1/chat/completions (chat)"] : [],
       },
     },
     tunnel: {
       installed: true,
-      running,
-      local_url: "http://127.0.0.1:8787/v1",
-      public_url: running ? "https://preview.ngrok-free.app/v1" : null,
+      configured: true,
+      running: effective.ngrok_enabled && (command === "get_app_state" ? mockBridgeRunning : running),
+      local_url: `http://127.0.0.1:${effective.port}/v1`,
+      public_url:
+        effective.ngrok_enabled && (command === "get_app_state" ? mockBridgeRunning : running)
+          ? "https://preview.ngrok-free.app/v1"
+          : null,
       error: null,
     },
     codex: {
       cli_installed: true,
       authenticated: true,
       summary: "Codex CLI is authenticated",
-      detail: "Local CLI session is ready.",
+      detail: "Browser preview only. Run npm run tauri for real ngrok.",
       checked_at_ms: Date.now(),
     },
   };
@@ -197,13 +250,12 @@ async function mockCommand<T>(command: string, args?: Record<string, unknown>): 
       cli_installed: true,
       authenticated: true,
       summary: "Codex CLI is authenticated",
-      detail: "Local CLI session is ready. Per-session token usage updates below.",
+      detail: "Browser preview only.",
       checked_at_ms: Date.now(),
     } as T;
   }
-  if (command === "save_settings" && args?.input && typeof args.input === "object") {
-    const input = args.input as { settings?: AppSettings };
-    return { ...state, settings: input.settings ?? settings } as T;
+  if (command === "save_settings") {
+    return state as T;
   }
   return state as T;
 }
@@ -239,7 +291,10 @@ export default function App() {
   const [portValidation, setPortValidation] = useState<PortValidation | null>(null);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [ngrokTokenVisible, setNgrokTokenVisible] = useState(false);
+  const [ngrokTokenOverride, setNgrokTokenOverride] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [codexRefreshing, setCodexRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -266,8 +321,21 @@ export default function App() {
 
   const loadState = useCallback(async () => {
     const next = await call<AppViewState>("get_app_state");
-    setState(next);
-    setDraft((current) => current ?? next.settings);
+    setState((prev) => {
+      if (prev?.bridge.running && !next.bridge.running && next.tunnel.error) {
+        setError(next.tunnel.error);
+      } else if (next.bridge.running && next.tunnel.error) {
+        setError(next.tunnel.error);
+      }
+      return next;
+    });
+    setDraft((current) => {
+      if (!current) return next.settings;
+      if (next.bridge.running) {
+        return { ...current, ngrok_enabled: next.settings.ngrok_enabled };
+      }
+      return current;
+    });
   }, []);
 
   useEffect(() => {
@@ -295,11 +363,15 @@ export default function App() {
   const bridge = state?.bridge;
   const tunnel = state?.tunnel;
   const settings = draft;
+  const running = Boolean(bridge?.running);
+  const tunnelEnabled = running
+    ? (state?.settings.ngrok_enabled ?? settings?.ngrok_enabled ?? false)
+    : (settings?.ngrok_enabled ?? false);
   const usage = bridge?.usage;
   const canStart = Boolean(
     settings?.api_key
     && portValidation?.available !== false
-    && (!settings.ngrok_enabled || settings.ngrok_authtoken.trim()),
+    && (!settings.ngrok_enabled || settings.ngrok_authtoken.trim() || tunnel?.configured),
   );
   const localBaseUrl = bridge?.base_url ?? tunnel?.local_url ?? `http://127.0.0.1:${settings?.port ?? 8787}/v1`;
   const cursorBaseUrl = tunnel?.public_url ?? localBaseUrl;
@@ -345,6 +417,7 @@ export default function App() {
       const next = await call<AppViewState>("start_bridge");
       setState(next);
       setDraft(next.settings);
+      setSetupOpen(true);
       void refreshCodex();
     } catch (err) {
       setError(errorMessage(err));
@@ -356,6 +429,7 @@ export default function App() {
   const stop = useCallback(async () => {
     setBusy("stop");
     setError(null);
+    setActivityOpen(false);
     try {
       const next = await call<AppViewState>("stop_bridge");
       setState(next);
@@ -418,6 +492,7 @@ export default function App() {
       last_usage: defaultUsage,
       total_usage: defaultUsage,
       last_error: null,
+      recent_logs: [],
     };
     return [
       ["Requests", snapshot.request_count.toString()],
@@ -449,132 +524,158 @@ export default function App() {
     );
   }
 
-  const running = Boolean(bridge?.running);
   const startDisabled = busy === "start" || busy === "stop" || (!running && !canStart);
+  const activityLogs = usage?.recent_logs ?? [];
+  const hasActivity = activityLogs.length > 0 || Boolean(usage?.last_error);
 
   return (
-    <main className="h-full overflow-hidden rounded-[26px] bg-panel text-slate-800 shadow-panel">
-      <div className="pointer-events-none absolute inset-0 bg-mesh opacity-40" />
-      <div className="panel-scroll relative flex h-full flex-col gap-3 overflow-y-auto p-4">
-        <section className="hero-card">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-[18px] bg-white/35 p-1.5 shadow-logo">
-              <img src={appIcon} alt="" className="h-full w-full object-contain" />
+    <main className="relative h-full overflow-hidden rounded-[26px] bg-panel text-slate-800 shadow-panel">
+      <div className="pointer-events-none absolute inset-0 bg-mesh opacity-35" />
+      <div className="panel-scroll panel-shell">
+        <section className={`hero-card ${activityOpen ? "hero-card-raised" : ""}`}>
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="logo-shell">
+              <img src={appIcon} alt="" className="logo-image" />
             </div>
             <div className="min-w-0 flex-1">
-              <div className="label">Local Bridge</div>
+              <div className="label-accent">gpt2cursor</div>
               <div className="mt-1 flex items-center gap-2">
-                {running ? <Wifi className="h-4 w-4 text-sky-500" /> : <WifiOff className="h-4 w-4 text-slate-400" />}
-                <h1 className="truncate text-[22px] font-black tracking-tight text-slate-900">
-                  {running ? "Running" : "Ready"}
-                </h1>
+                <span className={running ? "status-pill-live" : "status-pill-idle"}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${running ? "bg-emerald-500" : "bg-slate-300"}`} />
+                  {running ? "Live" : "Idle"}
+                </span>
+                <span className="truncate text-[15px] font-bold tracking-tight text-slate-900">
+                  {running ? `Port ${bridge?.port}` : "Local bridge"}
+                </span>
               </div>
-              <p className="mt-1 truncate text-xs text-slate-500">
-                {running ? `Listening on port ${bridge?.port}` : "Choose a port and start the local endpoint"}
-              </p>
             </div>
           </div>
-          <button
-            className={running ? "stop-btn" : "primary-btn"}
-            disabled={startDisabled}
-            onClick={running ? stop : start}
-          >
-            {busy === "start" || busy === "stop" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Power className="h-4 w-4" />}
-            {running ? "Stop" : "Start"}
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {running && (
+              <button
+                type="button"
+                className={`icon-btn relative h-10 w-10 ${activityOpen ? "border-sky-300/80 bg-sky-50 text-sky-600" : ""}`}
+                onClick={() => setActivityOpen((value) => !value)}
+                title="Request activity"
+                aria-label="Request activity"
+                aria-expanded={activityOpen}
+              >
+                <Activity className="h-4 w-4" />
+                {hasActivity && !activityOpen && <span className="activity-dot" />}
+              </button>
+            )}
+            <button
+              className={running ? "stop-btn" : "primary-btn"}
+              disabled={startDisabled}
+              onClick={running ? stop : start}
+            >
+              {busy === "start" || busy === "stop" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
+              {running ? "Stop" : "Start"}
+            </button>
+          </div>
         </section>
 
-        <section className="base-card">
-          <div className="min-w-0">
-            <div className="label">Cursor Base URL</div>
-            <div className="mt-1 break-all font-mono text-[13px] font-semibold text-sky-700">{cursorBaseUrl}</div>
+        <section className="url-card">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <span className="label">Cursor Base URL</span>
+              <button
+                className="inline-flex h-5 w-5 items-center justify-center rounded-full text-slate-400 transition hover:bg-sky-100 hover:text-sky-600"
+                onClick={() => setSetupOpen(true)}
+                title="Cursor setup guide"
+                aria-label="Cursor setup guide"
+              >
+                <CircleHelp className="h-3 w-3" />
+              </button>
+            </div>
+            <div className="url-value">{cursorBaseUrl}</div>
             {tunnel?.public_url && (
-              <div className="mt-1 break-all font-mono text-[11px] text-slate-500">
-                Local: {localBaseUrl}
-              </div>
+              <div className="mt-1 font-mono text-[10px] text-slate-500">Local · {localBaseUrl}</div>
             )}
           </div>
           <button className="icon-btn" onClick={() => void copy("base", cursorBaseUrl)} title="Copy Base URL">
-            {copied === "base" ? <CheckCircle2 className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
+            {copied === "base" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
           </button>
         </section>
 
-        <section className="soft-card p-3">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Globe className="h-4 w-4 text-sky-500" />
+        <section className="surface-card p-3">
+          <div className="section-head">
+            <div className="flex items-center gap-1.5">
+              <Globe className="h-3.5 w-3.5 text-sky-500" />
               <span className="label">Public Tunnel</span>
             </div>
-            <button
-              className="ghost-btn h-8 px-2.5 text-xs"
-              onClick={() => updateDraft("ngrok_enabled", !settings.ngrok_enabled)}
+            <SegmentCapsule
+              enabled={tunnelEnabled}
               disabled={running}
-            >
-              {settings.ngrok_enabled ? <ToggleRight className="h-4 w-4 text-sky-500" /> : <ToggleLeft className="h-4 w-4" />}
-              {settings.ngrok_enabled ? "Enabled" : "Disabled"}
-            </button>
+              onChange={(enabled) => updateDraft("ngrok_enabled", enabled)}
+            />
           </div>
-          <p className="text-xs leading-relaxed text-slate-500">
-            Expose the local bridge through ngrok so Cursor Agent can reach your endpoint from the cloud.
-          </p>
-          <div className="mt-3">
-            <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">ngrok Authtoken</span>
-            <div className="flex gap-2">
-              <input
-                className="field min-w-0 font-mono"
-                type={ngrokTokenVisible ? "text" : "password"}
-                value={settings.ngrok_authtoken}
-                placeholder="Paste your ngrok authtoken"
-                disabled={running}
-                onChange={(event) => updateDraft("ngrok_authtoken", event.target.value)}
-              />
-              <button
-                className="icon-btn shrink-0"
-                onClick={() => setNgrokTokenVisible((value) => !value)}
-                title={ngrokTokenVisible ? "Hide authtoken" : "Show authtoken"}
-              >
-                {ngrokTokenVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
-            </div>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <StatusChip label="ngrok" ok={tunnel?.installed ?? false} />
-            <StatusChip label="Tunnel" ok={tunnel?.running ?? false} />
-          </div>
-          {settings.ngrok_enabled && !tunnel?.installed && (
-            <p className="mt-2 text-xs text-amber-700">Install ngrok from ngrok.com/download before starting.</p>
-          )}
-          {tunnel?.error && (
-            <p className="mt-2 text-xs text-rose-600">{tunnel.error}</p>
-          )}
-          {tunnel?.public_url && (
-            <p className="mt-2 text-xs text-emerald-700">Public URL is ready. Copy the Base URL above into Cursor.</p>
-          )}
-        </section>
 
-        <section className="soft-card p-3">
-          <div className="label">Cursor Setup</div>
-          <ol className="mt-2 space-y-1.5 text-xs leading-relaxed text-slate-600">
-            <li>1. In Cursor Settings → Models, enable <span className="font-semibold text-slate-800">Override OpenAI Base URL</span> and paste the {settings.ngrok_enabled ? "public" : "local"} Base URL above.</li>
-            <li>2. Paste the API Key from this app into <span className="font-semibold text-slate-800">OpenAI API Key</span>.</li>
-            <li>3. Click <span className="font-semibold text-slate-800">+ Add Custom Model</span> and add <span className="font-mono font-semibold text-sky-700">{CURSOR_MODEL}</span>.</li>
-          </ol>
-          <button
-            className="ghost-btn mt-3 h-8 px-2.5 text-xs"
-            onClick={() => void copy("model", CURSOR_MODEL)}
-            title="Copy model name"
-          >
-            {copied === "model" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
-            {CURSOR_MODEL}
-          </button>
+          {tunnelEnabled ? (
+            <>
+              <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                ngrok exposes port <span className="font-mono font-semibold text-slate-700">{settings.port}</span> for Cursor Agent.
+              </p>
+              {tunnel?.configured && !settings.ngrok_authtoken.trim() && !ngrokTokenOverride ? (
+                <div className="info-card mt-2">Using saved ngrok login on this Mac.</div>
+              ) : (
+                <div className="mt-2">
+                  <span className="mb-1 block text-[9px] font-bold uppercase tracking-[0.16em] text-slate-400">Authtoken</span>
+                  <div className="flex gap-1.5">
+                    <input
+                      className="field min-w-0 font-mono"
+                      type={ngrokTokenVisible ? "text" : "password"}
+                      value={settings.ngrok_authtoken}
+                      placeholder={tunnel?.configured ? "Optional override" : "Paste ngrok authtoken"}
+                      disabled={running}
+                      onChange={(event) => updateDraft("ngrok_authtoken", event.target.value)}
+                    />
+                    <button
+                      className="icon-btn"
+                      onClick={() => setNgrokTokenVisible((value) => !value)}
+                      title={ngrokTokenVisible ? "Hide authtoken" : "Show authtoken"}
+                    >
+                      {ngrokTokenVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {tunnel?.configured && !settings.ngrok_authtoken.trim() && !ngrokTokenOverride && (
+                <button
+                  className="ghost-btn mt-2"
+                  onClick={() => setNgrokTokenOverride(true)}
+                  disabled={running}
+                >
+                  Override token
+                </button>
+              )}
+              <div className="mt-2.5 flex flex-wrap gap-1.5">
+                <StatusChip label="ngrok" ok={tunnel?.installed ?? false} />
+                <StatusChip label="login" ok={tunnel?.configured ?? false} />
+                <StatusChip label="tunnel" ok={tunnel?.running ?? false} />
+              </div>
+              {tunnelEnabled && !tunnel?.installed && (
+                <p className="mt-2 text-[11px] text-amber-700">Install ngrok from ngrok.com/download</p>
+              )}
+              {tunnelEnabled && tunnel?.installed && !tunnel?.configured && (
+                <p className="mt-2 text-[11px] text-amber-700">Run ngrok config add-authtoken or paste token above.</p>
+              )}
+              {tunnel?.error && <p className="mt-2 text-[11px] text-rose-600">{tunnel.error}</p>}
+            </>
+          ) : (
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              Local-only mode. Enable when Cursor Agent needs a public HTTPS endpoint.
+            </p>
+          )}
         </section>
 
         {error && <div className="error-card">{error}</div>}
+        {!error && tunnel?.error && running && <div className="warning-card">{tunnel.error}</div>}
 
-        <section className="grid grid-cols-[0.82fr_1.18fr] gap-3">
-          <div className="soft-card p-3">
-            <div className="mb-2 flex items-center gap-2">
-              <PlugZap className="h-4 w-4 text-sky-500" />
+        <section className="grid grid-cols-2 gap-2">
+          <div className="surface-card p-2.5">
+            <div className="mb-1.5 flex items-center gap-1.5">
+              <PlugZap className="h-3.5 w-3.5 text-sky-500" />
               <span className="label">Port</span>
             </div>
             <input
@@ -584,61 +685,69 @@ export default function App() {
               value={settings.port}
               onChange={(event) => updateDraft("port", Number(event.target.value || 0))}
             />
-            <p className={`mt-2 text-xs ${portValidation?.available === false ? "text-rose-500" : "text-slate-500"}`}>
-              {portValidation?.message ?? "Checking port..."}
+            <p className={`mt-1.5 text-[10px] ${portValidation?.available === false ? "text-rose-500" : "text-slate-500"}`}>
+              {portValidation?.message ?? "Checking..."}
             </p>
           </div>
 
-          <div className="soft-card p-3">
-            <div className="mb-2 flex items-center gap-2">
-              <KeyRound className="h-4 w-4 text-sky-500" />
+          <div className="surface-card p-2.5">
+            <div className="mb-1.5 flex items-center gap-1.5">
+              <KeyRound className="h-3.5 w-3.5 text-sky-500" />
               <span className="label">API Key</span>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-1.5">
               <input
-                className="field min-w-0 font-mono"
+                className="field min-w-0 flex-1 font-mono"
                 type={apiKeyVisible ? "text" : "password"}
                 value={settings.api_key}
-                placeholder="Generate or paste key"
+                placeholder="Generate key"
                 onChange={(event) => updateDraft("api_key", event.target.value)}
               />
               <button className="icon-btn shrink-0" onClick={generateKey} title="Generate key">
-                {busy === "key" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shuffle className="h-4 w-4" />}
+                {busy === "key" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shuffle className="h-3.5 w-3.5" />}
               </button>
             </div>
-            <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-              <span>{apiKeyVisible ? "Key is visible" : shortKey(settings.api_key)}</span>
-              <button
-                className="inline-flex h-7 w-7 items-center justify-center rounded-full text-slate-500 transition hover:bg-sky-100 hover:text-sky-600"
-                onClick={() => setApiKeyVisible((value) => !value)}
-                title={apiKeyVisible ? "Hide API key" : "Show API key"}
-                aria-label={apiKeyVisible ? "Hide API key" : "Show API key"}
-              >
-                {apiKeyVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
+            <div className="mt-1.5 flex items-center justify-between gap-2">
+              <span className="truncate text-[10px] text-slate-500">
+                {apiKeyVisible ? "Key visible" : shortKey(settings.api_key)}
+              </span>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  className="icon-btn h-7 w-7"
+                  onClick={() => settings.api_key && void copy("api-key", settings.api_key)}
+                  disabled={!settings.api_key}
+                  title="Copy API key"
+                >
+                  {copied === "api-key" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
+                </button>
+                <button
+                  className="icon-btn h-7 w-7"
+                  onClick={() => setApiKeyVisible((value) => !value)}
+                  title={apiKeyVisible ? "Hide API key" : "Show API key"}
+                >
+                  {apiKeyVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                </button>
+              </div>
             </div>
           </div>
         </section>
 
-        <section className="soft-card p-3">
-          <button
-            className="flex w-full items-center justify-between"
-            onClick={() => setAdvancedOpen((value) => !value)}
-          >
-            <span className="flex items-center gap-2">
-              <SlidersHorizontal className="h-4 w-4 text-sky-500" />
+        <section className="surface-card p-2.5">
+          <button className="flex w-full items-center justify-between" onClick={() => setAdvancedOpen((value) => !value)}>
+            <span className="flex items-center gap-1.5">
+              <SlidersHorizontal className="h-3.5 w-3.5 text-sky-500" />
               <span className="label">Defaults</span>
             </span>
-            <ChevronDown className={`h-4 w-4 text-slate-500 transition ${advancedOpen ? "rotate-180" : ""}`} />
+            <ChevronDown className={`h-3.5 w-3.5 text-slate-400 transition ${advancedOpen ? "rotate-180" : ""}`} />
           </button>
 
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <div className="block">
-              <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Cursor model</span>
-              <div className="field flex items-center font-mono text-[13px]">{CURSOR_MODEL}</div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <div>
+              <span className="mb-1 block text-[9px] font-bold uppercase tracking-[0.16em] text-slate-400">Cursor</span>
+              <div className="field flex items-center font-mono text-[12px]">{CURSOR_MODEL}</div>
             </div>
             <SelectField
-              label="Codex model"
+              label="Codex"
               value={settings.codex_model}
               options={codexModelOptions}
               onChange={(value) => updateDraft("codex_model", value)}
@@ -646,13 +755,8 @@ export default function App() {
           </div>
 
           {advancedOpen && (
-            <div className="mt-2 grid grid-cols-2 gap-2">
-              <SelectField
-                label="Profile"
-                value={settings.codex_profile}
-                options={profileOptions}
-                onChange={(value) => updateDraft("codex_profile", value)}
-              />
+            <div className="mt-2 grid grid-cols-2 gap-2 border-t border-slate-200/60 pt-2">
+              <SelectField label="Profile" value={settings.codex_profile} options={profileOptions} onChange={(v) => updateDraft("codex_profile", v)} />
               <SelectField
                 label="Sandbox"
                 value={settings.codex_sandbox}
@@ -660,7 +764,7 @@ export default function App() {
                   { value: "read-only", label: "read-only" },
                   { value: "workspace-write", label: "workspace-write" },
                 ]}
-                onChange={(value) => updateDraft("codex_sandbox", value)}
+                onChange={(v) => updateDraft("codex_sandbox", v)}
               />
               <SelectField
                 label="Approval"
@@ -670,10 +774,33 @@ export default function App() {
                   { value: "on-request", label: "on-request" },
                   { value: "untrusted", label: "untrusted" },
                 ]}
-                onChange={(value) => updateDraft("codex_approval", value)}
+                onChange={(v) => updateDraft("codex_approval", v)}
               />
+              <div>
+                <span className="mb-1 block text-[9px] font-bold uppercase tracking-[0.16em] text-slate-400">Timeout (s)</span>
+                <input
+                  className="field font-mono"
+                  type="number"
+                  min={60}
+                  step={30}
+                  value={Math.round(settings.codex_timeout_ms / 1000)}
+                  onChange={(event) => updateDraft("codex_timeout_ms", Math.max(60, Number(event.target.value || 0)) * 1000)}
+                />
+              </div>
+              <div>
+                <span className="mb-1 block text-[9px] font-bold uppercase tracking-[0.16em] text-slate-400">Context msgs</span>
+                <input
+                  className="field font-mono"
+                  type="number"
+                  min={4}
+                  max={128}
+                  step={1}
+                  value={settings.codex_max_messages}
+                  onChange={(event) => updateDraft("codex_max_messages", Math.max(4, Number(event.target.value || 0)))}
+                />
+              </div>
               <button className="ghost-btn self-end" onClick={saveDraft} disabled={busy === "save"}>
-                {busy === "save" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                {busy === "save" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
                 Save
               </button>
             </div>
@@ -682,55 +809,49 @@ export default function App() {
 
         {running && (
           <>
-            <section className="grid grid-cols-4 gap-2">
+            <section className="grid grid-cols-4 gap-1.5">
               {usageCards.map(([label, value]) => (
                 <div className="metric-card" key={label}>
-                  <div className="text-[9px] uppercase tracking-[0.13em] text-slate-400">{label}</div>
-                  <div className="mt-1 truncate font-mono text-sm font-black text-slate-900">{value}</div>
+                  <div className="text-[8px] uppercase tracking-[0.14em] text-slate-400">{label}</div>
+                  <div className="mt-0.5 truncate font-mono text-[13px] font-bold text-slate-900">{value}</div>
                 </div>
               ))}
             </section>
 
-            <section className="soft-card p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Activity className="h-4 w-4 text-sky-500" />
-                  <span className="label">Codex Status</span>
+            <section className="surface-card p-2.5">
+              <div className="section-head">
+                <div className="flex items-center gap-1.5">
+                  <Activity className="h-3.5 w-3.5 text-sky-500" />
+                  <span className="label">Codex</span>
                 </div>
-                <button
-                  className="icon-btn h-8 w-8"
-                  onClick={() => void refreshCodex()}
-                  disabled={codexRefreshing}
-                  title="Refresh Codex status"
-                >
-                  <RefreshCw className={`h-4 w-4 ${codexRefreshing ? "animate-spin" : ""}`} />
+                <button className="icon-btn h-7 w-7" onClick={() => void refreshCodex()} disabled={codexRefreshing} title="Refresh">
+                  <RefreshCw className={`h-3.5 w-3.5 ${codexRefreshing ? "animate-spin" : ""}`} />
                 </button>
               </div>
 
-              <div className="mb-3 flex flex-wrap gap-2">
+              <div className="mt-2 flex flex-wrap gap-1.5">
                 <StatusChip label="CLI" ok={codex?.cli_installed ?? false} />
                 <StatusChip label="Auth" ok={codex?.authenticated ?? false} />
               </div>
 
-              <div className="text-sm font-bold text-slate-900">
+              <div className="mt-2 text-[13px] font-semibold text-slate-900">
                 {codex?.summary ?? "Tap refresh to check Codex CLI"}
               </div>
-              <p className="mt-1 text-xs leading-relaxed text-slate-500">
-                {codex?.detail ?? "Session token usage updates automatically while the bridge is running."}
+              <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">
+                {codex?.detail ?? "Session usage updates while running."}
               </p>
-              <p className="mt-2 text-[10px] uppercase tracking-[0.14em] text-slate-400">
-                Checked {formatCheckedAt(codex?.checked_at_ms ?? 0)}
+              <p className="mt-1.5 text-[9px] uppercase tracking-[0.14em] text-slate-400">
+                {formatCheckedAt(codex?.checked_at_ms ?? 0)}
               </p>
 
-              <div className="mt-3 space-y-2">
-                <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Session tokens</div>
+              <div className="mt-2.5 space-y-1.5">
                 {sessionBars.map((bar) => (
                   <div key={bar.label}>
-                    <div className="mb-1 flex items-center justify-between text-[11px] text-slate-600">
+                    <div className="mb-0.5 flex items-center justify-between text-[10px] text-slate-600">
                       <span>{bar.label}</span>
                       <span className="font-mono font-semibold text-slate-800">{bar.value}</span>
                     </div>
-                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
+                    <div className="h-1 overflow-hidden rounded-full bg-slate-100">
                       <div className={`h-full rounded-full ${bar.color}`} style={{ width: `${bar.pct}%` }} />
                     </div>
                   </div>
@@ -740,27 +861,189 @@ export default function App() {
           </>
         )}
 
-        <section className="flex items-center justify-between gap-2">
+        <section className="flex items-center gap-2 pt-0.5">
           <button className="ghost-btn flex-1 justify-start" onClick={toggleLaunch} disabled={busy === "launch"}>
-            {settings.launch_at_login ? <ToggleRight className="h-4 w-4 text-sky-500" /> : <ToggleLeft className="h-4 w-4" />}
-            Launch at login
+            {settings.launch_at_login ? <ToggleRight className="h-3.5 w-3.5 text-emerald-500" /> : <ToggleLeft className="h-3.5 w-3.5" />}
+            Login item
           </button>
           <button className="ghost-btn" onClick={() => void call("quit_app")}>
-            <LogOut className="h-4 w-4" />
+            <LogOut className="h-3.5 w-3.5" />
             Quit
           </button>
         </section>
 
-        {usage?.last_error && running && <div className="warning-card">Last request: {usage.last_error}</div>}
+        {usage?.last_error && running && !activityOpen && (
+          <div className="warning-card">Last request: {usage.last_error}</div>
+        )}
       </div>
+
+      {activityOpen && running && (
+        <ActivityPopover
+          logs={activityLogs}
+          lastError={usage?.last_error}
+          onClose={() => setActivityOpen(false)}
+        />
+      )}
+
+      {setupOpen && (
+        <CursorSetupModal
+          baseUrl={cursorBaseUrl}
+          apiKey={settings.api_key}
+          model={CURSOR_MODEL}
+          usePublicUrl={Boolean(tunnelEnabled && tunnel?.public_url)}
+          copied={copied}
+          onCopy={(label, value) => void copy(label, value)}
+          onClose={() => setSetupOpen(false)}
+        />
+      )}
     </main>
+  );
+}
+
+function ActivityPopover({
+  logs,
+  lastError,
+  onClose,
+}: {
+  logs: string[];
+  lastError?: string | null;
+  onClose: () => void;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        className="activity-popover-backdrop"
+        onClick={onClose}
+        aria-label="Close activity"
+      />
+      <div className="activity-popover" role="dialog" aria-label="Request activity">
+        <div className="activity-popover-head">
+          <div className="flex items-center gap-1.5">
+            <Activity className="h-3.5 w-3.5 text-sky-500" />
+            <span className="text-[12px] font-bold text-slate-800">Activity</span>
+          </div>
+          <button
+            type="button"
+            className="icon-btn h-7 w-7"
+            onClick={onClose}
+            title="Collapse activity"
+            aria-label="Collapse activity"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        {lastError && <div className="activity-error">{lastError}</div>}
+        <div className="activity-log">
+          {logs.length > 0 ? (
+            logs.slice(-20).map((line, index) => (
+              <div key={`${line}-${index}`} className="activity-log-line">{line}</div>
+            ))
+          ) : (
+            <div className="activity-log-empty">Waiting for requests…</div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function SegmentCapsule({
+  enabled,
+  disabled,
+  onChange,
+}: {
+  enabled: boolean;
+  disabled?: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <div className="segment-capsule" role="group" aria-label="Public tunnel mode">
+      <button
+        type="button"
+        className={`segment-option ${enabled ? "segment-option-active" : ""}`}
+        disabled={disabled}
+        onClick={() => onChange(true)}
+      >
+        Enable
+      </button>
+      <button
+        type="button"
+        className={`segment-option ${!enabled ? "segment-option-active" : ""}`}
+        disabled={disabled}
+        onClick={() => onChange(false)}
+      >
+        Disable
+      </button>
+    </div>
+  );
+}
+
+function CursorSetupModal({
+  baseUrl,
+  apiKey,
+  model,
+  usePublicUrl,
+  copied,
+  onCopy,
+  onClose,
+}: {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  usePublicUrl: boolean;
+  copied: string | null;
+  onCopy: (label: string, value: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div>
+            <div className="label">Cursor Setup</div>
+            <h2 className="mt-1 text-lg font-black tracking-tight text-slate-900">Connect Cursor to gpt2cursor</h2>
+          </div>
+          <button className="icon-btn h-8 w-8 shrink-0" onClick={onClose} title="Close">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <ol className="space-y-3 text-sm leading-relaxed text-slate-600">
+          <li>
+            <span className="font-semibold text-slate-800">1. Base URL</span>
+            <p className="mt-1">In Cursor Settings → Models, enable Override OpenAI Base URL and paste the {usePublicUrl ? "public" : "local"} Base URL.</p>
+            <button className="ghost-btn mt-2 h-8 px-2.5 text-xs" onClick={() => onCopy("setup-base", baseUrl)}>
+              {copied === "setup-base" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
+              <span className="max-w-[260px] truncate font-mono">{baseUrl}</span>
+            </button>
+          </li>
+          <li>
+            <span className="font-semibold text-slate-800">2. API Key</span>
+            <p className="mt-1">Paste the gpt2cursor API key into OpenAI API Key.</p>
+            <button className="ghost-btn mt-2 h-8 px-2.5 text-xs" onClick={() => onCopy("setup-key", apiKey)}>
+              {copied === "setup-key" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
+              Copy API key
+            </button>
+          </li>
+          <li>
+            <span className="font-semibold text-slate-800">3. Custom model</span>
+            <p className="mt-1">Click + Add Custom Model and add the model name below.</p>
+            <button className="ghost-btn mt-2 h-8 px-2.5 text-xs" onClick={() => onCopy("setup-model", model)}>
+              {copied === "setup-model" ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
+              {model}
+            </button>
+          </li>
+        </ol>
+        <button className="primary-btn mt-4 w-full" onClick={onClose}>Got it</button>
+      </div>
+    </div>
   );
 }
 
 function StatusChip({ label, ok }: { label: string; ok: boolean }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${ok ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-slate-300"}`} />
+    <span className={ok ? "status-chip-ok" : "status-chip-off"}>
+      <span className={`h-1 w-1 rounded-full ${ok ? "bg-emerald-500" : "bg-slate-300"}`} />
       {label}
     </span>
   );
@@ -779,7 +1062,7 @@ function SelectField({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">{label}</span>
+      <span className="mb-1 block text-[9px] font-bold uppercase tracking-[0.16em] text-slate-400">{label}</span>
       <select className="field appearance-auto" value={value} onChange={(event) => onChange(event.target.value)}>
         {options.map((option) => (
           <option key={option.label} value={option.value}>

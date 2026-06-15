@@ -50,7 +50,7 @@ Cursor Agent routes requests through Cursor's cloud, which cannot reach
 `127.0.0.1`. To use gpt2cursor with Agent mode:
 
 1. Install [ngrok](https://ngrok.com/download) on the same machine.
-2. In gpt2cursor, enable **Public Tunnel** and paste your ngrok authtoken.
+2. In gpt2cursor, enable **Public Tunnel**. If you already ran `ngrok config add-authtoken`, the app reuses that login automatically.
 3. Click **Start**. The app starts the local bridge and an ngrok tunnel.
 4. Copy the **public** Base URL shown in the panel into Cursor Settings.
 5. Paste the gpt2cursor API key and add custom model `gpt2cursor-local`.
@@ -73,7 +73,7 @@ Notes:
   cumulative tokens for this app session.
 - **Codex Account**: best-effort local CLI status; account quota is shown as
   unavailable when the CLI does not expose a stable quota API.
-- **Public Tunnel**: optional ngrok integration for Cursor Agent; paste authtoken,
+- **Public Tunnel**: optional ngrok integration for Cursor Agent; reuses your local ngrok login or accepts an override token,
   start the bridge, and copy the public Base URL.
 - **Launch at login**: writes/removes a macOS LaunchAgent for the app.
 

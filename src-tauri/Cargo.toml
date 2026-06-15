@@ -1,6 +1,6 @@
 [package]
 name = "gpt2cursor"
-version = "0.1.3"
+version = "0.4.0"
 description = "A local menu-bar Codex-to-Cursor bridge"
 authors = ["gpt2cursor"]
 edition = "2021"
@@ -20,7 +20,10 @@ tauri-runtime = "=2.0.0"
 tauri-runtime-wry = "=2.0.0"
 tauri-utils = "=2.0.0"
 time = "=0.3.36"
+portable-pty = "0.9"
+dirs = "5.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "=0.26.0"
 objc = "=0.2.7"
+libc = "0.2"

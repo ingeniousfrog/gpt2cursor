@@ -8,8 +8,8 @@ mod settings;
 mod tray_icon;
 
 use bridge::{
-    base_url, is_port_available, start_bridge as start_bridge_server, BridgeRuntime, BridgeStatus,
-    UsageSnapshot,
+    append_bridge_log, base_url, is_port_available, start_bridge as start_bridge_server, BridgeRuntime,
+    BridgeStatus, UsageSnapshot,
 };
 use codex::{list_codex_models, probe_codex_status, CodexAccountStatus, CodexModelOption, RealCodexExecutor};
 use ngrok::{NgrokRuntime, TunnelStatus};
@@ -24,7 +24,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, PhysicalPosition, WindowEvent, Wry};
 
 struct ManagedState {
-    settings: Mutex<AppSettings>,
+    settings: Arc<Mutex<AppSettings>>,
     bridge: Mutex<Option<BridgeRuntime>>,
     ngrok: Mutex<Option<NgrokRuntime>>,
     tunnel_error: Mutex<Option<String>>,
@@ -215,10 +215,18 @@ fn start_bridge(
     }
 
     let runtime = start_bridge_server(
-        settings.clone(),
+        Arc::clone(&state.settings),
         Arc::clone(&state.usage),
         Arc::new(RealCodexExecutor),
     )?;
+    if let Ok(mut usage) = state.usage.lock() {
+        usage.recent_logs.clear();
+        usage.last_error = None;
+    }
+    append_bridge_log(
+        &state.usage,
+        format!("bridge started on port {}", settings.port),
+    );
     *state
         .bridge
         .lock()
@@ -226,14 +234,25 @@ fn start_bridge(
 
     let mut tunnel_error = None;
     if settings.ngrok_enabled {
-        match ngrok::start_tunnel(settings.port, &settings.ngrok_authtoken) {
-            Ok(runtime) => {
-                *state
-                    .ngrok
-                    .lock()
-                    .map_err(|_| "Tunnel state is unavailable".to_string())? = Some(runtime);
+        if !ngrok::is_ngrok_installed() {
+            tunnel_error = Some(
+                "ngrok is not installed. Install it from https://ngrok.com/download".to_string(),
+            );
+        } else if !ngrok::is_ngrok_ready(&settings.ngrok_authtoken) {
+            tunnel_error = Some(
+                "ngrok authtoken is not configured. Log in with ngrok or paste your authtoken."
+                    .to_string(),
+            );
+        } else {
+            match ngrok::start_tunnel(settings.port, &settings.ngrok_authtoken) {
+                Ok(runtime) => {
+                    *state
+                        .ngrok
+                        .lock()
+                        .map_err(|_| "Tunnel state is unavailable".to_string())? = Some(runtime);
+                }
+                Err(err) => tunnel_error = Some(err),
             }
-            Err(err) => tunnel_error = Some(err),
         }
     }
     *state
@@ -333,12 +352,57 @@ fn app_state(app: &AppHandle, state: &tauri::State<ManagedState>) -> Result<AppV
         .map_err(|_| "Settings state is unavailable".to_string())?
         .clone();
     settings.launch_at_login = launch::is_launch_at_login_enabled();
+
+    let mut service_error = None;
+
+    {
+        let mut bridge_guard = state
+            .bridge
+            .lock()
+            .map_err(|_| "Bridge state is unavailable".to_string())?;
+        if let Some(runtime) = bridge_guard.as_ref() {
+            if !runtime.is_alive() {
+                service_error = Some("Local bridge stopped unexpectedly".to_string());
+                if let Some(runtime) = bridge_guard.take() {
+                    runtime.stop();
+                }
+            }
+        }
+    }
+
     let bridge = state
         .bridge
         .lock()
         .map_err(|_| "Bridge state is unavailable".to_string())?;
     let running = bridge.is_some();
     let port = bridge.as_ref().map(|runtime| runtime.port).unwrap_or(settings.port);
+
+    let mut tunnel_error = state
+        .tunnel_error
+        .lock()
+        .map_err(|_| "Tunnel state is unavailable".to_string())?
+        .clone();
+
+    if settings.ngrok_enabled && running {
+        let mut ngrok_guard = state
+            .ngrok
+            .lock()
+            .map_err(|_| "Tunnel state is unavailable".to_string())?;
+        if let Some(mut runtime) = ngrok_guard.take() {
+            match runtime.refresh(port) {
+                Ok(()) => *ngrok_guard = Some(runtime),
+                Err(err) => {
+                    runtime.stop();
+                    tunnel_error = Some(err);
+                }
+            }
+        }
+    }
+
+    if service_error.is_some() {
+        tunnel_error = service_error;
+    }
+
     let usage = state
         .usage
         .lock()
@@ -348,11 +412,7 @@ fn app_state(app: &AppHandle, state: &tauri::State<ManagedState>) -> Result<AppV
         .ngrok
         .lock()
         .map_err(|_| "Tunnel state is unavailable".to_string())?;
-    let tunnel_error = state
-        .tunnel_error
-        .lock()
-        .map_err(|_| "Tunnel state is unavailable".to_string())?
-        .clone();
+    let ngrok_authtoken = settings.ngrok_authtoken.clone();
 
     let _ = app;
     Ok(AppViewState {
@@ -363,7 +423,7 @@ fn app_state(app: &AppHandle, state: &tauri::State<ManagedState>) -> Result<AppV
             base_url: base_url(port),
             usage,
         },
-        tunnel: ngrok::tunnel_status(port, ngrok.as_ref(), tunnel_error),
+        tunnel: ngrok::tunnel_status(port, ngrok.as_ref(), &ngrok_authtoken, tunnel_error),
         codex: CodexAccountStatus {
             cli_installed: false,
             authenticated: false,
@@ -388,7 +448,7 @@ fn main() {
             let mut settings = load_settings(&settings_file);
             settings.launch_at_login = launch::is_launch_at_login_enabled();
             app.manage(ManagedState {
-                settings: Mutex::new(settings),
+                settings: Arc::new(Mutex::new(settings)),
                 bridge: Mutex::new(None),
                 ngrok: Mutex::new(None),
                 tunnel_error: Mutex::new(None),
@@ -452,7 +512,7 @@ fn toggle_panel(app: &AppHandle<Wry>, position: PhysicalPosition<f64>) {
     }
 
     let panel_width = 440.0;
-    let panel_height = 720.0;
+    let panel_height = 640.0;
     let mut x = (position.x - panel_width / 2.0).max(8.0);
     let mut y = (position.y + 10.0).max(8.0);
 

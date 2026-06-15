@@ -7,9 +7,52 @@ const CORNER_RADIUS: f32 = 10.0;
 pub fn load_tray_icon() -> Result<Image<'static>, String> {
     let decoded = image::load_from_memory(include_bytes!("../icons/icon.png"))
         .map_err(|err| format!("tray icon decode failed: {err}"))?;
-    let fitted = resize_to_fit(decoded.to_rgba8(), TRAY_PX);
+    let cropped = crop_to_content(decoded.to_rgba8(), 0.12);
+    let fitted = resize_to_fit(cropped, TRAY_PX);
     let masked = mask_rounded_corners(fitted, CORNER_RADIUS);
     Ok(Image::new_owned(masked.into_raw(), TRAY_PX, TRAY_PX))
+}
+
+fn crop_to_content(img: RgbaImage, padding_ratio: f32) -> RgbaImage {
+    let (width, height) = img.dimensions();
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = img.get_pixel(x, y);
+            if is_content_pixel(pixel) {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+
+    if max_x <= min_x || max_y <= min_y {
+        return img;
+    }
+
+    let content_w = max_x - min_x + 1;
+    let content_h = max_y - min_y + 1;
+    let pad_x = (content_w as f32 * padding_ratio).round() as u32;
+    let pad_y = (content_h as f32 * padding_ratio).round() as u32;
+    let left = min_x.saturating_sub(pad_x);
+    let top = min_y.saturating_sub(pad_y);
+    let right = (max_x + pad_x + 1).min(width);
+    let bottom = (max_y + pad_y + 1).min(height);
+    image::imageops::crop_imm(&img, left, top, right - left, bottom - top).to_image()
+}
+
+fn is_content_pixel(pixel: &Rgba<u8>) -> bool {
+    if pixel[3] < 24 {
+        return false;
+    }
+    let luminance = (pixel[0] as u16 + pixel[1] as u16 + pixel[2] as u16) / 3;
+    luminance > 28
 }
 
 fn resize_to_fit(img: RgbaImage, size: u32) -> RgbaImage {

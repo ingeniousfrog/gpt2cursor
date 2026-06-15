@@ -39,9 +39,9 @@ export default {
       },
       backgroundImage: {
         panel:
-          "radial-gradient(circle at 50% 0%, rgba(148, 224, 255, 0.62), transparent 30%), radial-gradient(circle at 18% 82%, rgba(178, 157, 255, 0.18), transparent 28%), linear-gradient(155deg, #f8fcff 0%, #eef8ff 46%, #f9fbff 100%)",
+          "radial-gradient(circle at 50% -8%, rgba(148, 210, 255, 0.45), transparent 34%), radial-gradient(circle at 92% 88%, rgba(178, 157, 255, 0.12), transparent 26%), linear-gradient(168deg, #f9fcff 0%, #f1f7ff 52%, #fafcff 100%)",
         mesh:
-          "linear-gradient(115deg, rgba(64, 164, 255, 0.12), transparent 42%), repeating-linear-gradient(90deg, rgba(24, 80, 140, 0.045) 0, rgba(24, 80, 140, 0.045) 1px, transparent 1px, transparent 18px)",
+          "linear-gradient(118deg, rgba(56, 132, 214, 0.07), transparent 40%), repeating-linear-gradient(90deg, rgba(21, 56, 96, 0.028) 0, rgba(21, 56, 96, 0.028) 1px, transparent 1px, transparent 16px)",
         run: "linear-gradient(135deg, #5ddcff 0%, #408cff 58%, #7667ff 100%)",
         stop: "linear-gradient(135deg, #fb7185 0%, #ef4444 100%)",
       },

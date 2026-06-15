@@ -10,11 +10,15 @@ pub struct AppSettings {
     pub api_key: String,
     pub model: String,
     pub codex_command: String,
+    #[serde(default)]
+    pub codex_workdir: String,
     pub codex_model: String,
     pub codex_profile: String,
     pub codex_sandbox: String,
     pub codex_approval: String,
     pub codex_timeout_ms: u64,
+    #[serde(default = "default_codex_max_messages")]
+    pub codex_max_messages: usize,
     pub launch_at_login: bool,
     #[serde(default)]
     pub ngrok_enabled: bool,
@@ -29,11 +33,13 @@ impl Default for AppSettings {
             api_key: String::new(),
             model: "gpt2cursor-local".to_string(),
             codex_command: "codex".to_string(),
+            codex_workdir: String::new(),
             codex_model: "gpt-5.5".to_string(),
             codex_profile: String::new(),
             codex_sandbox: "read-only".to_string(),
             codex_approval: "never".to_string(),
-            codex_timeout_ms: 120_000,
+            codex_timeout_ms: 300_000,
+            codex_max_messages: 12,
             launch_at_login: false,
             ngrok_enabled: false,
             ngrok_authtoken: String::new(),
@@ -60,11 +66,15 @@ impl AppSettings {
         if self.codex_timeout_ms < 1_000 {
             return Err("Codex timeout must be at least 1000 ms".to_string());
         }
-        if self.ngrok_enabled && self.ngrok_authtoken.trim().is_empty() {
-            return Err("ngrok authtoken is required when tunnel is enabled".to_string());
+        if self.codex_max_messages == 0 {
+            return Err("Codex context must include at least 1 message".to_string());
         }
         Ok(())
     }
+}
+
+fn default_codex_max_messages() -> usize {
+    12
 }
 
 pub fn validate_port(port: u16) -> Result<(), String> {
@@ -81,6 +91,12 @@ pub fn load_settings(path: &PathBuf) -> AppSettings {
     let mut settings = serde_json::from_str::<AppSettings>(&raw).unwrap_or_default();
     if settings.model != "gpt2cursor-local" {
         settings.model = "gpt2cursor-local".to_string();
+    }
+    if settings.codex_timeout_ms <= 120_000 {
+        settings.codex_timeout_ms = 300_000;
+    }
+    if settings.codex_max_messages == 0 {
+        settings.codex_max_messages = default_codex_max_messages();
     }
     settings
 }
@@ -145,15 +161,5 @@ mod tests {
             ..AppSettings::default()
         };
         assert!(settings.validate().unwrap_err().contains("sandbox"));
-    }
-
-    #[test]
-    fn rejects_ngrok_without_authtoken() {
-        let settings = AppSettings {
-            api_key: "local".to_string(),
-            ngrok_enabled: true,
-            ..AppSettings::default()
-        };
-        assert!(settings.validate().unwrap_err().contains("ngrok authtoken"));
     }
 }
