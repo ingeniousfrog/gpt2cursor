@@ -18,6 +18,7 @@ use std::{
 
 const HOST: &str = "127.0.0.1";
 const MAX_BODY_BYTES: usize = 1_048_576;
+pub const CURSOR_MODEL_IDS: &[&str] = &["codex-local", "gpt2cursor-local"];
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct UsageSnapshot {
@@ -139,19 +140,7 @@ fn handle_request(
 
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/healthz") => write_json(stream, 200, json!({"ok":true})),
-        ("GET", "/v1/models") => write_json(
-            stream,
-            200,
-            json!({
-                "object":"list",
-                "data":[{
-                    "id": settings.model,
-                    "object":"model",
-                    "created":0,
-                    "owned_by":"local-codex"
-                }]
-            }),
-        ),
+        ("GET", "/v1/models") => write_json(stream, 200, models_payload()),
         ("POST", "/v1/chat/completions") => {
             handle_chat(stream, settings, usage, executor, request.body)
         }
@@ -374,6 +363,23 @@ fn parse_message(index: usize, message: &Value) -> Result<ChatMessage, String> {
     })
 }
 
+fn models_payload() -> Value {
+    json!({
+        "object": "list",
+        "data": CURSOR_MODEL_IDS
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": id,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "local-codex"
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
 fn is_authorized(headers: &HashMap<String, String>, api_key: &str) -> bool {
     headers
         .get("authorization")
@@ -572,6 +578,7 @@ mod tests {
         runtime.stop();
         assert!(response.contains("HTTP/1.1 200 OK"));
         assert!(response.contains("codex-local"));
+        assert!(response.contains("gpt2cursor-local"));
     }
 
     #[test]

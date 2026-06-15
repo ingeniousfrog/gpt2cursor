@@ -20,6 +20,7 @@ import {
   WifiOff,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import appIcon from "../src-tauri/icons/icon.png";
 
 declare global {
   interface Window {
@@ -218,7 +219,7 @@ export default function App() {
     if (!state?.bridge.running) return undefined;
     const timer = window.setInterval(() => {
       void loadState().catch((err) => setError(errorMessage(err)));
-    }, 1500);
+    }, 3000);
     return () => window.clearInterval(timer);
   }, [loadState, state?.bridge.running]);
 
@@ -369,11 +370,11 @@ export default function App() {
 
   return (
     <main className="h-full overflow-hidden rounded-[26px] bg-panel text-slate-800 shadow-panel">
-      <div className="pointer-events-none absolute inset-0 bg-mesh opacity-80" />
+      <div className="pointer-events-none absolute inset-0 bg-mesh opacity-40" />
       <div className="panel-scroll relative flex h-full flex-col gap-3 overflow-y-auto p-4">
         <section className="hero-card">
           <div className="flex min-w-0 items-center gap-3">
-            <img src="/src-tauri/icons/icon.png" alt="" className="h-14 w-14 rounded-[18px] object-cover shadow-logo" />
+            <img src={appIcon} alt="" className="h-14 w-14 rounded-[18px] object-contain shadow-logo" />
             <div className="min-w-0 flex-1">
               <div className="label">Local Bridge</div>
               <div className="mt-1 flex items-center gap-2">
@@ -405,6 +406,28 @@ export default function App() {
           <button className="icon-btn" onClick={() => void copy("base", baseUrl)} title="Copy Base URL">
             {copied === "base" ? <CheckCircle2 className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
           </button>
+        </section>
+
+        <section className="soft-card p-3">
+          <div className="label">Cursor Setup</div>
+          <ol className="mt-2 space-y-1.5 text-xs leading-relaxed text-slate-600">
+            <li>1. In Cursor Settings → Models, enable <span className="font-semibold text-slate-800">Override OpenAI Base URL</span> and paste the Base URL above.</li>
+            <li>2. Paste the API Key from this app into <span className="font-semibold text-slate-800">OpenAI API Key</span>.</li>
+            <li>3. Click <span className="font-semibold text-slate-800">+ Add Custom Model</span> and add one of the model names below. Cursor does not auto-fetch models from custom endpoints.</li>
+          </ol>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {cursorModelOptions.map((option) => (
+              <button
+                key={option.value}
+                className="ghost-btn h-8 px-2.5 text-xs"
+                onClick={() => void copy(option.value, option.value)}
+                title={`Copy ${option.label}`}
+              >
+                {copied === option.value ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
+                {option.label}
+              </button>
+            ))}
+          </div>
         </section>
 
         {error && <div className="error-card">{error}</div>}

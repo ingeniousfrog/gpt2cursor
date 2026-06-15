@@ -34,7 +34,12 @@ in Cursor:
 
 - Base URL: `http://127.0.0.1:8787/v1` by default, or the Base URL shown in the app
 - API Key: the key shown in the app
-- Model: `codex-local` by default
+- Model: click **+ Add Custom Model** in Cursor Settings → Models and add
+  `codex-local` or `gpt2cursor-local`
+
+Cursor does not automatically fetch models from a custom Base URL. You must add
+the model name manually. The bridge still exposes both names via `GET /v1/models`
+for other OpenAI-compatible clients.
 
 The app always binds the bridge to `127.0.0.1`; it does not expose the service
 on your LAN or the public internet.

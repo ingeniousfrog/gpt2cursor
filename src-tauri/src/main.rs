@@ -455,8 +455,6 @@ fn toggle_panel(app: &AppHandle<Wry>, position: PhysicalPosition<f64>) {
     }
 
     let _ = window.set_position(PhysicalPosition::new(x, y));
-    #[cfg(target_os = "macos")]
-    round_macos_window(&window);
     let _ = window.show();
     let _ = window.set_focus();
 }
