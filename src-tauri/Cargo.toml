@@ -3,6 +3,7 @@ name = "gpt2cursor"
 version = "0.4.1"
 description = "A local menu-bar Codex-to-Cursor bridge"
 authors = ["gpt2cursor"]
+license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.78"
 

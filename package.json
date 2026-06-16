@@ -2,6 +2,7 @@
   "name": "gpt2cursor",
   "version": "0.4.1",
   "description": "A local menu-bar Codex-to-Cursor bridge.",
+  "license": "Apache-2.0",
   "type": "module",
   "private": true,
   "scripts": {

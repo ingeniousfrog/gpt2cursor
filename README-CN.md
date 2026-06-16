@@ -23,6 +23,7 @@
   <img alt="Windows" src="https://img.shields.io/badge/Windows-x64-0078d4?style=for-the-badge&logo=windows">
   <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2.0-24c8db?style=for-the-badge&logo=tauri">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-native-000000?style=for-the-badge&logo=rust">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue?style=for-the-badge"></a>
 </p>
 
 <p align="center">
