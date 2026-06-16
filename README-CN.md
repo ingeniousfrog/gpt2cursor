@@ -33,8 +33,9 @@
 
 1. 下载最新 [Release](https://github.com/ingeniousfrog/gpt2cursor/releases)。
 2. 安装并打开 **gpt2cursor**，点击 **Start**。
-3. 在 Cursor 中添加模型 `gpt2cursor-local`，填入面板中的 Base URL 与 API Key。
-4. **Ask** 用 `http://127.0.0.1:8787/v1`；**Agent** 用 ngrok 公网 HTTPS 地址。
+3. 开启 **Public Tunnel**（ngrok），复制公网 HTTPS Base URL。
+4. 在 Cursor 中添加模型 `gpt2cursor-local`，填入该 Base URL 与面板中的 API Key。
+5. 使用 **Ask** 或 **Agent** —— 两者都需要公网 ngrok 地址（Cursor 无法访问 `127.0.0.1`）。
 
 完整步骤见 [docs/HOW_TO_USE_CN.md](docs/HOW_TO_USE_CN.md)
 
@@ -62,14 +63,15 @@ Cursor 支持 OpenAI-compatible provider，Codex CLI 则使用你本机的登录
 - PTY 流式桥接，兼容 Cursor Ask / Agent。
 - 本地 bearer key（`g2c_...`）保护 bridge。
 - Activity 面板实时请求日志。
-- 可选 ngrok 公网隧道（Agent 模式）。
+- ngrok 公网隧道，让 Cursor 云端访问本机 bridge（Ask 与 Agent 均需）。
+- macOS **开机自登录**（可选）。
 - 可配置 Codex 超时与上下文裁剪。
 
 ## 当前支持的 Cursor 模式
 
 | Cursor 模式 | 状态 | Base URL |
 | --- | --- | --- |
-| Ask | 已支持 | 本地 `http://127.0.0.1:8787/v1` |
+| Ask | 已支持 | ngrok 公网 HTTPS |
 | Agent | 已支持 | ngrok 公网 HTTPS |
 | 其他模式 | 待开发 | 暂不支持 |
 
@@ -85,24 +87,27 @@ Cursor 支持 OpenAI-compatible provider，Codex CLI 则使用你本机的登录
 
 ```mermaid
 flowchart LR
-  Cursor["Cursor"]
+  Cursor["Cursor 云端"]
+  Ngrok["ngrok HTTPS 隧道"]
   LocalEndpoint["gpt2cursor"]
   CodexCLI["Codex CLI"]
   CodexSession["本地 Codex 会话"]
 
-  Cursor -->|"OpenAI-compatible SSE"| LocalEndpoint
+  Cursor -->|"OpenAI-compatible SSE"| Ngrok
+  Ngrok --> LocalEndpoint
   LocalEndpoint -->|"codex exec --json via PTY"| CodexCLI
   CodexCLI --> CodexSession
   CodexSession --> CodexCLI
   CodexCLI --> LocalEndpoint
-  LocalEndpoint --> Cursor
+  LocalEndpoint --> Ngrok
+  Ngrok --> Cursor
 ```
 
 ## Cursor 配置（摘要）
 
 | 配置项 | 值 |
 | --- | --- |
-| Base URL | gpt2cursor 面板显示（Ask 用本地，Agent 用公网） |
+| Base URL | gpt2cursor 面板中的公网 HTTPS 地址（ngrok） |
 | API Key | 面板中的本地 key |
 | Model | `gpt2cursor-local`（需在 Cursor Settings → Models 手动添加） |
 

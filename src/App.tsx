@@ -614,7 +614,7 @@ export default function App() {
           {tunnelEnabled ? (
             <>
               <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                ngrok exposes port <span className="font-mono font-semibold text-slate-700">{settings.port}</span> for Cursor Agent.
+                ngrok exposes port <span className="font-mono font-semibold text-slate-700">{settings.port}</span> so Cursor (Ask &amp; Agent) can reach this bridge.
               </p>
               {tunnel?.configured && !settings.ngrok_authtoken.trim() && !ngrokTokenOverride ? (
                 <div className="info-card mt-2">Using saved ngrok login on this Mac.</div>
@@ -664,7 +664,7 @@ export default function App() {
             </>
           ) : (
             <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-              Local-only mode. Enable when Cursor Agent needs a public HTTPS endpoint.
+              Cursor cannot reach 127.0.0.1. Enable Public Tunnel for Ask &amp; Agent.
             </p>
           )}
         </section>

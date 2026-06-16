@@ -33,8 +33,9 @@
 
 1. Download the latest [Release](https://github.com/ingeniousfrog/gpt2cursor/releases).
 2. Install and open **gpt2cursor**, then click **Start**.
-3. In Cursor, add model `gpt2cursor-local` with the Base URL and API key from the panel.
-4. Use **Ask** with `http://127.0.0.1:8787/v1`, or **Agent** with the public ngrok URL.
+3. Enable **Public Tunnel** (ngrok) and copy the public HTTPS Base URL.
+4. In Cursor, add model `gpt2cursor-local` with that Base URL and the API key from the panel.
+5. Use **Ask** or **Agent** — both need the public ngrok URL (Cursor cannot reach `127.0.0.1`).
 
 Full walkthrough: [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)
 
@@ -63,14 +64,15 @@ No cloud relay. No account-sharing service. Not a replacement for the official O
 - PTY streaming bridge for Cursor Ask / Agent compatibility.
 - Local bearer key (`g2c_...`) protecting the bridge.
 - Activity panel with live request logs.
-- Optional ngrok public tunnel for Cursor Agent mode.
+- ngrok public tunnel so Cursor cloud can reach your local bridge (Ask & Agent).
+- macOS **Launch at login** (optional).
 - Configurable Codex timeout and context trimming.
 
 ## Supported Cursor Modes
 
 | Cursor mode | Status | Base URL |
 | --- | --- | --- |
-| Ask | Supported | Local `http://127.0.0.1:8787/v1` |
+| Ask | Supported | Public ngrok HTTPS URL |
 | Agent | Supported | Public ngrok HTTPS URL |
 | Other modes | Planned | Not supported yet |
 
@@ -86,24 +88,27 @@ No cloud relay. No account-sharing service. Not a replacement for the official O
 
 ```mermaid
 flowchart LR
-  Cursor["Cursor"]
+  Cursor["Cursor Cloud"]
+  Ngrok["ngrok HTTPS tunnel"]
   LocalEndpoint["gpt2cursor"]
   CodexCLI["Codex CLI"]
   CodexSession["Local Codex session"]
 
-  Cursor -->|"OpenAI-compatible SSE"| LocalEndpoint
+  Cursor -->|"OpenAI-compatible SSE"| Ngrok
+  Ngrok --> LocalEndpoint
   LocalEndpoint -->|"codex exec --json via PTY"| CodexCLI
   CodexCLI --> CodexSession
   CodexSession --> CodexCLI
   CodexCLI --> LocalEndpoint
-  LocalEndpoint --> Cursor
+  LocalEndpoint --> Ngrok
+  Ngrok --> Cursor
 ```
 
 ## Cursor Setup (Summary)
 
 | Setting | Value |
 | --- | --- |
-| Base URL | From gpt2cursor panel (local for Ask, public for Agent) |
+| Base URL | Public HTTPS URL from gpt2cursor panel (ngrok) |
 | API Key | Local key from gpt2cursor panel |
 | Model | `gpt2cursor-local` (add manually in Cursor Settings → Models) |
 
