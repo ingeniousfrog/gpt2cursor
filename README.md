@@ -18,7 +18,7 @@
 
 <p align="center">
   <img alt="Build" src="https://img.shields.io/badge/build-passing-22c55e?style=for-the-badge">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.1-0f172a?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.4.2-0f172a?style=for-the-badge">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-Apple%20Silicon-111827?style=for-the-badge&logo=apple">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-x64-0078d4?style=for-the-badge&logo=windows">
   <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2.0-24c8db?style=for-the-badge&logo=tauri">
@@ -44,8 +44,9 @@ Full walkthrough: [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)
 
 | Platform | Artifact | Status |
 | --- | --- | --- |
-| macOS (Apple Silicon) | `gpt2cursor_0.4.1_aarch64.dmg` | Stable |
-| Windows (x64) | `gpt2cursor_0.4.1_x64-setup.exe` | Experimental |
+| macOS (Apple Silicon) | `gpt2cursor_0.4.2_aarch64.dmg` | Stable |
+| Windows (x64) | `gpt2cursor_0.4.2_x64-setup.exe` | Experimental |
+| Linux (x64) | `gpt2cursor_0.4.2_amd64.AppImage` | Experimental |
 
 Runtime requirements: **Codex CLI logged in on the same machine**. Node.js is **not** required for end users.
 
@@ -124,7 +125,7 @@ Details: [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)
 
 ### Windows
 
-1. Run `gpt2cursor_0.4.1_x64-setup.exe`.
+1. Run `gpt2cursor_0.4.2_x64-setup.exe`.
 2. If SmartScreen warns: **More info → Run anyway**.
 
 Install and troubleshooting details: [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)

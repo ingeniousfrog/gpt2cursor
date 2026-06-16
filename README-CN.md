@@ -18,7 +18,7 @@
 
 <p align="center">
   <img alt="Build" src="https://img.shields.io/badge/build-passing-22c55e?style=for-the-badge">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.1-0f172a?style=for-the-badge">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.4.2-0f172a?style=for-the-badge">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-Apple%20Silicon-111827?style=for-the-badge&logo=apple">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-x64-0078d4?style=for-the-badge&logo=windows">
   <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2.0-24c8db?style=for-the-badge&logo=tauri">
@@ -44,8 +44,9 @@
 
 | 平台 | 安装包 | 状态 |
 | --- | --- | --- |
-| macOS（Apple Silicon） | `gpt2cursor_0.4.1_aarch64.dmg` | 稳定 |
-| Windows（x64） | `gpt2cursor_0.4.1_x64-setup.exe` | 实验性 |
+| macOS（Apple Silicon） | `gpt2cursor_0.4.2_aarch64.dmg` | 稳定 |
+| Windows（x64） | `gpt2cursor_0.4.2_x64-setup.exe` | 实验性 |
+| Linux（x64） | `gpt2cursor_0.4.2_amd64.AppImage` | 实验性 |
 
 运行依赖：同机 **Codex CLI 已登录**。终端用户**不需要** Node.js。
 
@@ -123,7 +124,7 @@ flowchart LR
 
 ### Windows
 
-1. 运行 `gpt2cursor_0.4.1_x64-setup.exe`。
+1. 运行 `gpt2cursor_0.4.2_x64-setup.exe`。
 2. 若 SmartScreen 提示：选择 **更多信息 → 仍要运行**。
 
 安装与排障详见 [docs/HOW_TO_USE_CN.md](docs/HOW_TO_USE_CN.md)

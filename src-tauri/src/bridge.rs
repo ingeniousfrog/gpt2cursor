@@ -20,7 +20,11 @@ use std::{
 };
 
 const HOST: &str = "127.0.0.1";
-const MAX_BODY_BYTES: usize = 1_048_576;
+// Hard cap for the raw HTTP body Cursor sends. Parsed messages are trimmed long before Codex.
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const ERR_BODY_TOO_LARGE: &str = "request_body_too_large";
+const USER_BODY_TOO_LARGE_HINT: &str = "Request body too large. Lower Context msgs in gpt2cursor, or start a new Cursor Agent chat.";
+const PARSE_MESSAGE_HEADROOM: usize = 4;
 const MAX_RECENT_LOGS: usize = 40;
 pub const CURSOR_MODEL_ID: &str = "gpt2cursor-local";
 
@@ -162,7 +166,15 @@ fn handle_request(
     usage: Arc<Mutex<UsageSnapshot>>,
     executor: Arc<dyn CodexExecutor>,
 ) -> Result<(), String> {
-    let request = read_request(stream)?;
+    let request = match read_request(stream) {
+        Ok(value) => value,
+        Err(message) if message == ERR_BODY_TOO_LARGE => {
+            append_log(&usage, USER_BODY_TOO_LARGE_HINT.to_string());
+            write_json(stream, 413, body_too_large_error_json())?;
+            return Err(USER_BODY_TOO_LARGE_HINT.to_string());
+        }
+        Err(message) => return Err(message),
+    };
     let route = normalize_route(&request.method, &request.path);
     append_log(
         &usage,
@@ -208,7 +220,12 @@ fn handle_chat(
             return Err("invalid json".to_string());
         }
     };
-    let chat = match parse_chat_request(&input) {
+    let incoming_message_count = count_incoming_messages(&input);
+    let max_raw_messages = settings
+        .codex_max_messages
+        .saturating_mul(PARSE_MESSAGE_HEADROOM)
+        .max(16);
+    let chat = match parse_chat_request(&input, max_raw_messages) {
         Ok(value) => value,
         Err(message) => {
             append_log(&usage, format!("chat parse error: {message}"));
@@ -220,13 +237,24 @@ fn handle_chat(
             return Err("invalid chat request".to_string());
         }
     };
+    if incoming_message_count > chat.messages.len() {
+        append_log(
+            &usage,
+            format!(
+                "pre-trimmed {} -> {} messages (lower Context msgs if this keeps happening)",
+                incoming_message_count,
+                chat.messages.len()
+            ),
+        );
+    }
     append_log(
         &usage,
         format!(
-            "chat {} stream={} messages={}",
+            "chat {} stream={} messages={} (body {} KB)",
             chat.model,
             chat.stream,
-            chat.messages.len()
+            chat.messages.len(),
+            body.len() / 1024
         ),
     );
 
@@ -488,7 +516,7 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         }
         buffer.extend_from_slice(&chunk[..count]);
         if buffer.len() > MAX_BODY_BYTES {
-            return Err("Request body is too large".to_string());
+            return Err(ERR_BODY_TOO_LARGE.to_string());
         }
         if let Some(index) = find_header_end(&buffer) {
             header_end = index;
@@ -512,7 +540,7 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         .unwrap_or(0);
 
     if content_length > MAX_BODY_BYTES {
-        return Err("Request body is too large".to_string());
+        return Err(ERR_BODY_TOO_LARGE.to_string());
     }
 
     let body_start = header_end + 4;
@@ -528,7 +556,7 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         }
         body.extend_from_slice(&chunk[..count]);
         if body.len() > MAX_BODY_BYTES {
-            return Err("Request body is too large".to_string());
+            return Err(ERR_BODY_TOO_LARGE.to_string());
         }
     }
     body.truncate(content_length);
@@ -541,7 +569,59 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     })
 }
 
-fn parse_chat_request(input: &Value) -> Result<ChatRequest, String> {
+fn body_too_large_error_json() -> Value {
+    json!({
+        "error": {
+            "message": USER_BODY_TOO_LARGE_HINT,
+            "type": "invalid_request_error",
+            "code": ERR_BODY_TOO_LARGE
+        }
+    })
+}
+
+fn count_incoming_messages(input: &Value) -> usize {
+    if let Some(messages) = input.get("messages").and_then(Value::as_array) {
+        return messages.len();
+    }
+    input
+        .get("input")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0)
+}
+
+fn tail_raw_json_messages(messages: Vec<Value>, max_messages: usize) -> Vec<Value> {
+    if messages.len() <= max_messages {
+        return messages;
+    }
+
+    let system = messages
+        .iter()
+        .filter(|message| message_role(message) == Some("system"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let non_system = messages
+        .into_iter()
+        .filter(|message| message_role(message) != Some("system"))
+        .collect::<Vec<_>>();
+    let tail_budget = max_messages.saturating_sub(system.len()).max(1);
+    let mut tail = non_system
+        .into_iter()
+        .rev()
+        .take(tail_budget)
+        .collect::<Vec<_>>();
+    tail.reverse();
+
+    let mut trimmed = system;
+    trimmed.extend(tail);
+    trimmed
+}
+
+fn message_role(message: &Value) -> Option<&str> {
+    message.get("role").and_then(Value::as_str)
+}
+
+fn parse_chat_request(input: &Value, max_raw_messages: usize) -> Result<ChatRequest, String> {
     let model = input
         .get("model")
         .and_then(Value::as_str)
@@ -558,6 +638,7 @@ fn parse_chat_request(input: &Value) -> Result<ChatRequest, String> {
     if raw_messages.is_empty() {
         return Err("messages must include at least one message".to_string());
     }
+    let raw_messages = tail_raw_json_messages(raw_messages, max_raw_messages);
 
     let mut parsed = Vec::new();
     for (index, message) in raw_messages.iter().enumerate() {
@@ -899,6 +980,7 @@ fn write_response(
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        413 => "Payload Too Large",
         502 => "Bad Gateway",
         _ => "Internal Server Error",
     };
@@ -1083,7 +1165,7 @@ mod tests {
             "stream":true,
             "messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
         });
-        let chat = parse_chat_request(&input).unwrap();
+        let chat = parse_chat_request(&input, 64).unwrap();
         assert!(chat.stream);
         assert_eq!(chat.messages[0].content, "hello");
     }
@@ -1105,7 +1187,7 @@ mod tests {
                 }
             ]
         });
-        let chat = parse_chat_request(&input).unwrap();
+        let chat = parse_chat_request(&input, 64).unwrap();
         assert_eq!(chat.messages.len(), 2);
         assert!(chat.messages[1].content.contains("[tool_call Read]"));
     }
@@ -1124,7 +1206,7 @@ mod tests {
                 }
             ]
         });
-        let chat = parse_chat_request(&input).unwrap();
+        let chat = parse_chat_request(&input, 64).unwrap();
         assert_eq!(chat.messages[1].content, "done");
     }
 
@@ -1137,7 +1219,7 @@ mod tests {
                 "content":[{"type":"input_text","text":"hello from cursor"}]
             }]
         });
-        let chat = parse_chat_request(&input).unwrap();
+        let chat = parse_chat_request(&input, 64).unwrap();
         assert_eq!(chat.messages[0].content, "hello from cursor");
     }
 
@@ -1150,7 +1232,7 @@ mod tests {
                 {"role":"assistant","content":""}
             ]
         });
-        let chat = parse_chat_request(&input).unwrap();
+        let chat = parse_chat_request(&input, 64).unwrap();
         assert_eq!(chat.messages.len(), 1);
     }
 
@@ -1162,7 +1244,7 @@ mod tests {
                 {"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}
             ]
         });
-        let chat = parse_chat_request(&input).unwrap();
+        let chat = parse_chat_request(&input, 64).unwrap();
         assert_eq!(chat.messages[0].content, "hello");
     }
 
@@ -1224,6 +1306,34 @@ mod tests {
         runtime.stop();
         assert!(response.contains("text/event-stream"));
         assert!(response.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn pre_trims_large_incoming_messages_before_codex() {
+        let messages: Vec<_> = (0..100)
+            .map(|index| json!({"role":"user","content":format!("msg {index}")}))
+            .collect();
+        let input = json!({"model":"gpt2cursor-local","messages": messages});
+        let chat = parse_chat_request(&input, 16).unwrap();
+        assert_eq!(chat.messages.len(), 16);
+    }
+
+    #[test]
+    fn returns_413_for_oversized_body() {
+        let (runtime, port, usage) = test_runtime(Arc::new(MockExecutor));
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nauthorization: Bearer secret\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        let response = send_raw(port, &request);
+        runtime.stop();
+        assert!(response.contains("HTTP/1.1 413 Payload Too Large") || response.contains("HTTP/1.1 413"));
+        assert!(response.contains("Request body too large"));
+        assert!(response.contains(ERR_BODY_TOO_LARGE));
+        assert_eq!(
+            usage.lock().unwrap().last_error.as_deref(),
+            Some(USER_BODY_TOO_LARGE_HINT)
+        );
     }
 
     #[test]

@@ -873,7 +873,9 @@ export default function App() {
         </section>
 
         {usage?.last_error && running && !activityOpen && (
-          <div className="warning-card">Last request: {usage.last_error}</div>
+          <div className="warning-card">
+            Last request: {formatLastError(usage.last_error).title}
+          </div>
         )}
       </div>
 
@@ -900,6 +902,20 @@ export default function App() {
   );
 }
 
+function formatLastError(error: string): { title: string; hints: string[] } {
+  const lower = error.toLowerCase();
+  if (lower.includes("request body too large")) {
+    return {
+      title: error,
+      hints: [
+        "Lower Context msgs in gpt2cursor Defaults",
+        "Start a new Cursor Agent chat to drop old history",
+      ],
+    };
+  }
+  return { title: error, hints: [] };
+}
+
 function ActivityPopover({
   logs,
   lastError,
@@ -909,6 +925,8 @@ function ActivityPopover({
   lastError?: string | null;
   onClose: () => void;
 }) {
+  const errorDetail = lastError ? formatLastError(lastError) : null;
+
   return (
     <>
       <button
@@ -933,7 +951,18 @@ function ActivityPopover({
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
-        {lastError && <div className="activity-error">{lastError}</div>}
+        {errorDetail && (
+          <div className="activity-error">
+            <div>{errorDetail.title}</div>
+            {errorDetail.hints.length > 0 && (
+              <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-[10px] leading-relaxed opacity-90">
+                {errorDetail.hints.map((hint) => (
+                  <li key={hint}>{hint}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
         <div className="activity-log">
           {logs.length > 0 ? (
             logs.slice(-20).map((line, index) => (
