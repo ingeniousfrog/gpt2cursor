@@ -24,7 +24,9 @@ time = "=0.3.36"
 portable-pty = "0.9"
 dirs = "5.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "=0.26.0"
 objc = "=0.2.7"
-libc = "0.2"
