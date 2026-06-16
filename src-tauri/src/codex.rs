@@ -179,7 +179,7 @@ fn truncate_for_error(text: &str) -> String {
 }
 
 pub fn resolve_codex_command(command: &str) -> PathBuf {
-    if command.contains('/') {
+    if command.contains('/') || command.contains('\\') {
         return PathBuf::from(command);
     }
 
@@ -194,14 +194,41 @@ pub fn resolve_codex_command(command: &str) -> PathBuf {
         return PathBuf::from("codex");
     }
 
-    for candidate in [
-        "/opt/homebrew/bin/codex",
-        "/usr/local/bin/codex",
-        "/Applications/Codex.app/Contents/Resources/codex",
-    ] {
-        let path = PathBuf::from(candidate);
-        if path.is_file() {
-            return path;
+    #[cfg(windows)]
+    {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            for relative in [
+                "Programs\\codex\\codex.exe",
+                "codex\\codex.exe",
+                "OpenAI\\Codex\\codex.exe",
+            ] {
+                let path = PathBuf::from(&local_app_data).join(relative);
+                if path.is_file() {
+                    return path;
+                }
+            }
+        }
+        if let Ok(user_profile) = std::env::var("USERPROFILE") {
+            for relative in [".local\\bin\\codex.exe", ".codex\\bin\\codex.exe"] {
+                let path = PathBuf::from(&user_profile).join(relative);
+                if path.is_file() {
+                    return path;
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        for candidate in [
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            "/Applications/Codex.app/Contents/Resources/codex",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
         }
     }
 
@@ -680,7 +707,12 @@ pub fn probe_codex_status() -> CodexAccountStatus {
 }
 
 fn which_codex_on_path() -> bool {
-    Command::new("which")
+    #[cfg(windows)]
+    let program = "where";
+    #[cfg(not(windows))]
+    let program = "which";
+
+    Command::new(program)
         .arg("codex")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -690,10 +722,9 @@ fn which_codex_on_path() -> bool {
 }
 
 fn has_local_codex_auth() -> bool {
-    let Ok(home) = std::env::var("HOME") else {
+    let Some(home) = dirs::home_dir() else {
         return false;
     };
-    let home = PathBuf::from(home);
     for relative in [
         ".codex/auth.json",
         ".codex/credentials.json",
