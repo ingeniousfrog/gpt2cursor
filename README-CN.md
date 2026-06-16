@@ -17,13 +17,8 @@
 </p>
 
 <p align="center">
-  <img alt="Build" src="https://img.shields.io/badge/build-passing-22c55e?style=for-the-badge">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.2-0f172a?style=for-the-badge">
-  <img alt="macOS" src="https://img.shields.io/badge/macOS-Apple%20Silicon-111827?style=for-the-badge&logo=apple">
-  <img alt="Windows" src="https://img.shields.io/badge/Windows-x64-0078d4?style=for-the-badge&logo=windows">
-  <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2.0-24c8db?style=for-the-badge&logo=tauri">
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-native-000000?style=for-the-badge&logo=rust">
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue?style=for-the-badge"></a>
+  <a href="https://github.com/ingeniousfrog/gpt2cursor/releases"><img alt="release" src="https://img.shields.io/badge/release-v0.4.2-orange?style=flat-square"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square"></a>
 </p>
 
 <p align="center">
