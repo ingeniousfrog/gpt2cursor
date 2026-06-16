@@ -41,7 +41,6 @@
 | --- | --- | --- |
 | macOS（Apple Silicon） | `gpt2cursor_0.4.2_aarch64.dmg` | 稳定 |
 | Windows（x64） | `gpt2cursor_0.4.2_x64-setup.exe` | 实验性 |
-| Linux（x64） | `gpt2cursor_0.4.2_amd64.AppImage` | 实验性 |
 
 运行依赖：同机 **Codex CLI 已登录**。终端用户**不需要** Node.js。
 

@@ -41,7 +41,6 @@ Full walkthrough: [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)
 | --- | --- | --- |
 | macOS (Apple Silicon) | `gpt2cursor_0.4.2_aarch64.dmg` | Stable |
 | Windows (x64) | `gpt2cursor_0.4.2_x64-setup.exe` | Experimental |
-| Linux (x64) | `gpt2cursor_0.4.2_amd64.AppImage` | Experimental |
 
 Runtime requirements: **Codex CLI logged in on the same machine**. Node.js is **not** required for end users.
 
