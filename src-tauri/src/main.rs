@@ -226,6 +226,7 @@ fn start_bridge(
     append_bridge_log(
         &state.usage,
         format!("bridge started on port {}", settings.port),
+        settings.dev_mode,
     );
     *state
         .bridge
@@ -440,6 +441,12 @@ fn to_hex(bytes: &[u8]) -> String {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

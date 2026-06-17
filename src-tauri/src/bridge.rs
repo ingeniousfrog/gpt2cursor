@@ -26,6 +26,9 @@ const ERR_BODY_TOO_LARGE: &str = "request_body_too_large";
 const USER_BODY_TOO_LARGE_HINT: &str = "Request body too large. Lower Context msgs in gpt2cursor, or start a new Cursor Agent chat.";
 const PARSE_MESSAGE_HEADROOM: usize = 4;
 const MAX_RECENT_LOGS: usize = 40;
+const MAX_RECENT_LOGS_DEV: usize = 200;
+const MAX_LOG_LINE_CHARS: usize = 2_048;
+const MAX_DEV_BODY_LOG_CHARS: usize = 4_096;
 pub const CURSOR_MODEL_ID: &str = "gpt2cursor-local";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,7 +172,7 @@ fn handle_request(
     let request = match read_request(stream) {
         Ok(value) => value,
         Err(message) if message == ERR_BODY_TOO_LARGE => {
-            append_log(&usage, USER_BODY_TOO_LARGE_HINT.to_string());
+            append_log(&usage, USER_BODY_TOO_LARGE_HINT.to_string(), false);
             write_json(stream, 413, body_too_large_error_json())?;
             return Err(USER_BODY_TOO_LARGE_HINT.to_string());
         }
@@ -179,6 +182,7 @@ fn handle_request(
     append_log(
         &usage,
         format!("{} {} ({})", request.method, request.path, route.label()),
+        settings.dev_mode,
     );
 
     if !is_authorized(&request.headers, &settings.api_key) {
@@ -228,7 +232,7 @@ fn handle_chat(
     let chat = match parse_chat_request(&input, max_raw_messages) {
         Ok(value) => value,
         Err(message) => {
-            append_log(&usage, format!("chat parse error: {message}"));
+            append_log(&usage, format!("chat parse error: {message}"), settings.dev_mode);
             write_json(
                 stream,
                 400,
@@ -245,6 +249,7 @@ fn handle_chat(
                 incoming_message_count,
                 chat.messages.len()
             ),
+            settings.dev_mode,
         );
     }
     append_log(
@@ -256,7 +261,21 @@ fn handle_chat(
             chat.messages.len(),
             body.len() / 1024
         ),
+        settings.dev_mode,
     );
+    if settings.dev_mode {
+        append_log(
+            &usage,
+            format!(
+                "dev request body: {}",
+                truncate_log_text(
+                    String::from_utf8_lossy(&body).trim(),
+                    MAX_DEV_BODY_LOG_CHARS,
+                )
+            ),
+            true,
+        );
+    }
 
     let (prompt, prompt_meta) = build_codex_prompt(&chat.messages, settings);
     append_log(
@@ -267,7 +286,15 @@ fn handle_chat(
             prompt_meta.sent_messages,
             settings.codex_timeout_ms / 1000
         ),
+        settings.dev_mode,
     );
+    if settings.dev_mode {
+        append_log(
+            &usage,
+            format!("dev codex prompt: {}", truncate_log_text(&prompt, MAX_LOG_LINE_CHARS)),
+            true,
+        );
+    }
     if prompt_meta.original_messages > prompt_meta.sent_messages {
         append_log(
             &usage,
@@ -275,6 +302,7 @@ fn handle_chat(
                 "trimmed history {} -> {} messages for codex",
                 prompt_meta.original_messages, prompt_meta.sent_messages
             ),
+            settings.dev_mode,
         );
     }
 
@@ -285,7 +313,7 @@ fn handle_chat(
     let codex = match executor.execute(settings, &prompt) {
         Ok(value) => value,
         Err(message) => {
-            append_log(&usage, format!("codex failed: {message}"));
+            append_log(&usage, format!("codex failed: {message}"), settings.dev_mode);
             write_json(
                 stream,
                 502,
@@ -328,7 +356,18 @@ fn handle_chat(
             "chat ok {}ms out={} tok",
             codex.duration_ms, codex.usage.output_tokens
         ),
+        settings.dev_mode,
     );
+    if settings.dev_mode {
+        append_log(
+            &usage,
+            format!(
+                "dev codex result: {}",
+                truncate_log_text(&codex.text, MAX_LOG_LINE_CHARS)
+            ),
+            true,
+        );
+    }
     result
 }
 
@@ -343,9 +382,15 @@ fn handle_chat_streaming(
     let created = now_epoch_seconds();
     let id = format!("chatcmpl-{created}");
     let model = chat.model.clone();
+    let dev_mode = settings.dev_mode;
+    let usage_for_stream = Arc::clone(&usage);
 
     if matches!(start_sse(stream)?, WriteOutcome::ClientDisconnected) {
-        append_log(&usage, "client disconnected before stream started".to_string());
+        append_log(
+            &usage,
+            "client disconnected before stream started".to_string(),
+            dev_mode,
+        );
         return Ok(());
     }
     if matches!(
@@ -365,7 +410,11 @@ fn handle_chat_streaming(
         )?,
         WriteOutcome::ClientDisconnected
     ) {
-        append_log(&usage, "client disconnected before codex started".to_string());
+        append_log(
+            &usage,
+            "client disconnected before codex started".to_string(),
+            dev_mode,
+        );
         return Ok(());
     }
 
@@ -388,19 +437,54 @@ fn handle_chat_streaming(
                 WriteOutcome::Ok => Ok(()),
                 WriteOutcome::ClientDisconnected => Err("client disconnected".to_string()),
             },
-            CodexStreamEvent::Keepalive => match write_sse_keepalive(stream)? {
-                WriteOutcome::Ok => Ok(()),
-                WriteOutcome::ClientDisconnected => Err("client disconnected".to_string()),
-            },
+            CodexStreamEvent::Reasoning(text) | CodexStreamEvent::Activity(text) => {
+                append_log(
+                    &usage_for_stream,
+                    format!("codex: {text}"),
+                    dev_mode,
+                );
+                match write_sse_reasoning(stream, &id, created, &model, &text)? {
+                    WriteOutcome::Ok => Ok(()),
+                    WriteOutcome::ClientDisconnected => Err("client disconnected".to_string()),
+                }
+            }
+            CodexStreamEvent::Raw(text) => {
+                append_log(
+                    &usage_for_stream,
+                    format!("dev codex jsonl: {text}"),
+                    true,
+                );
+                Ok(())
+            }
+            CodexStreamEvent::Keepalive { elapsed_secs } => {
+                let heartbeat = format!("still working... {elapsed_secs}s");
+                append_log(
+                    &usage_for_stream,
+                    format!("codex: {heartbeat}"),
+                    dev_mode,
+                );
+                match write_sse_reasoning(stream, &id, created, &model, &heartbeat)? {
+                    WriteOutcome::Ok => Ok(()),
+                    WriteOutcome::ClientDisconnected => Err("client disconnected".to_string()),
+                }
+            }
         }
     }) {
         Ok(value) => value,
         Err(message) if message == "client disconnected" => {
-            append_log(&usage, "client disconnected during codex stream".to_string());
+            append_log(
+                &usage,
+                "client disconnected during codex stream".to_string(),
+                dev_mode,
+            );
             return Ok(());
         }
         Err(message) => {
-            append_log(&usage, format!("codex failed (stream): {message}"));
+            append_log(
+                &usage,
+                format!("codex failed (stream): {message}"),
+                dev_mode,
+            );
             if try_write_stream_error(stream, &id, created, &model, &message)? {
                 return Ok(());
             }
@@ -418,6 +502,7 @@ fn handle_chat_streaming(
                 "client disconnected after stream finished ({}ms)",
                 codex.duration_ms
             ),
+            dev_mode,
         );
         record_success(&usage, &codex.usage, codex.duration_ms);
         return Ok(());
@@ -429,7 +514,18 @@ fn handle_chat_streaming(
             "stream ok {}ms out={} tok",
             codex.duration_ms, codex.usage.output_tokens
         ),
+        dev_mode,
     );
+    if dev_mode {
+        append_log(
+            &usage,
+            format!(
+                "dev codex result: {}",
+                truncate_log_text(&codex.text, MAX_LOG_LINE_CHARS)
+            ),
+            true,
+        );
+    }
     Ok(())
 }
 
@@ -923,13 +1019,32 @@ fn start_sse(stream: &mut TcpStream) -> Result<WriteOutcome, String> {
     write_all(stream, head.as_bytes(), "start SSE stream")
 }
 
-fn write_sse_keepalive(stream: &mut TcpStream) -> Result<WriteOutcome, String> {
-    write_all(stream, b": keepalive\n\n", "write SSE keepalive")
-}
-
 fn write_sse_data(stream: &mut TcpStream, payload: &Value) -> Result<WriteOutcome, String> {
     let body = format!("data: {payload}\n\n");
     write_all(stream, body.as_bytes(), "write SSE chunk")
+}
+
+fn write_sse_reasoning(
+    stream: &mut TcpStream,
+    id: &str,
+    created: u64,
+    model: &str,
+    text: &str,
+) -> Result<WriteOutcome, String> {
+    write_sse_data(
+        stream,
+        &json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": text},
+                "finish_reason": null
+            }]
+        }),
+    )
 }
 
 fn write_sse_finish(
@@ -1028,20 +1143,38 @@ pub fn record_success(usage: &Arc<Mutex<UsageSnapshot>>, token_usage: &TokenUsag
     }
 }
 
-pub fn append_bridge_log(usage: &Arc<Mutex<UsageSnapshot>>, line: impl Into<String>) {
-    append_log(usage, line.into());
+pub fn append_bridge_log(
+    usage: &Arc<Mutex<UsageSnapshot>>,
+    line: impl Into<String>,
+    dev_mode: bool,
+) {
+    append_log(usage, line.into(), dev_mode);
 }
 
-fn append_log(usage: &Arc<Mutex<UsageSnapshot>>, line: String) {
+fn append_log(usage: &Arc<Mutex<UsageSnapshot>>, line: String, dev_mode: bool) {
+    let line = truncate_log_text(&line, MAX_LOG_LINE_CHARS);
     let stamped = format!("{} {}", format_log_timestamp(), line);
     eprintln!("[gpt2cursor] {stamped}");
     if let Ok(mut snapshot) = usage.lock() {
         snapshot.recent_logs.push(stamped);
-        if snapshot.recent_logs.len() > MAX_RECENT_LOGS {
-            let overflow = snapshot.recent_logs.len() - MAX_RECENT_LOGS;
+        let max_logs = if dev_mode {
+            MAX_RECENT_LOGS_DEV
+        } else {
+            MAX_RECENT_LOGS
+        };
+        if snapshot.recent_logs.len() > max_logs {
+            let overflow = snapshot.recent_logs.len() - max_logs;
             snapshot.recent_logs.drain(0..overflow);
         }
     }
+}
+
+fn truncate_log_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_chars).collect();
+    format!("{truncated}... [truncated]")
 }
 
 fn format_log_timestamp() -> String {

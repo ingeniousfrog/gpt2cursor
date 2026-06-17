@@ -24,6 +24,10 @@ pub struct AppSettings {
     pub ngrok_enabled: bool,
     #[serde(default)]
     pub ngrok_authtoken: String,
+    #[serde(default)]
+    pub dev_mode: bool,
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 impl Default for AppSettings {
@@ -43,8 +47,14 @@ impl Default for AppSettings {
             launch_at_login: false,
             ngrok_enabled: false,
             ngrok_authtoken: String::new(),
+            dev_mode: false,
+            theme: default_theme(),
         }
     }
+}
+
+fn default_theme() -> String {
+    "dark".to_string()
 }
 
 impl AppSettings {

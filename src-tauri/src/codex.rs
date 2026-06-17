@@ -302,9 +302,12 @@ fn truncate_message_content(content: &str) -> String {
     )
 }
 
-pub enum CodexStreamEvent<'a> {
-    TextDelta(&'a str),
-    Keepalive,
+pub enum CodexStreamEvent {
+    TextDelta(String),
+    Reasoning(String),
+    Activity(String),
+    Raw(String),
+    Keepalive { elapsed_secs: u64 },
 }
 
 pub fn run_codex_in_pty_streaming<F>(
@@ -313,7 +316,7 @@ pub fn run_codex_in_pty_streaming<F>(
     mut on_event: F,
 ) -> Result<CodexResult, String>
 where
-    F: FnMut(CodexStreamEvent<'_>) -> Result<(), String>,
+    F: FnMut(CodexStreamEvent) -> Result<(), String>,
 {
     let started = Instant::now();
     let pty_system = native_pty_system();
@@ -367,6 +370,7 @@ where
     });
 
     let timeout = Duration::from_millis(settings.codex_timeout_ms);
+    let dev_mode = settings.dev_mode;
     let mut stdout = String::new();
     let mut message_texts = Vec::new();
     let mut usage = TokenUsage::default();
@@ -386,31 +390,23 @@ where
         match line_rx.recv_timeout(Duration::from_millis(500)) {
             Ok(line) => {
                 stdout.push_str(&line);
-                if let Ok(event) = serde_json::from_str::<Value>(line.trim()) {
-                    if let Some(text) = extract_message_text(&event) {
-                        message_texts.push(text.clone());
-                        let delta = if text.starts_with(&last_sent_text) {
-                            text[last_sent_text.len()..].to_string()
-                        } else {
-                            text.clone()
-                        };
-                        if !delta.is_empty() {
-                            if let Err(err) = on_event(CodexStreamEvent::TextDelta(&delta)) {
-                                let _ = child.kill();
-                                let _ = reader_handle.join();
-                                return Err(err);
-                            }
-                            last_sent_text = text;
-                        }
-                    }
-                    if let Some(next_usage) = extract_usage(&event) {
-                        usage = next_usage;
-                    }
+                if let Err(err) = dispatch_codex_line(
+                    &line,
+                    dev_mode,
+                    &mut on_event,
+                    &mut message_texts,
+                    &mut last_sent_text,
+                    &mut usage,
+                ) {
+                    let _ = child.kill();
+                    let _ = reader_handle.join();
+                    return Err(err);
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if last_keepalive.elapsed() >= Duration::from_secs(10) {
-                    if let Err(err) = on_event(CodexStreamEvent::Keepalive) {
+                    let elapsed_secs = started.elapsed().as_secs();
+                    if let Err(err) = on_event(CodexStreamEvent::Keepalive { elapsed_secs }) {
                         let _ = child.kill();
                         let _ = reader_handle.join();
                         return Err(err);
@@ -420,26 +416,17 @@ where
                 if matches!(child.try_wait(), Ok(Some(_))) {
                     while let Ok(line) = line_rx.try_recv() {
                         stdout.push_str(&line);
-                        if let Ok(event) = serde_json::from_str::<Value>(line.trim()) {
-                            if let Some(text) = extract_message_text(&event) {
-                                message_texts.push(text.clone());
-                                let delta = if text.starts_with(&last_sent_text) {
-                                    text[last_sent_text.len()..].to_string()
-                                } else {
-                                    text.clone()
-                                };
-                                if !delta.is_empty() {
-                                    if let Err(err) = on_event(CodexStreamEvent::TextDelta(&delta)) {
-                                        let _ = child.kill();
-                                        let _ = reader_handle.join();
-                                        return Err(err);
-                                    }
-                                    last_sent_text = text;
-                                }
-                            }
-                            if let Some(next_usage) = extract_usage(&event) {
-                                usage = next_usage;
-                            }
+                        if let Err(err) = dispatch_codex_line(
+                            &line,
+                            dev_mode,
+                            &mut on_event,
+                            &mut message_texts,
+                            &mut last_sent_text,
+                            &mut usage,
+                        ) {
+                            let _ = child.kill();
+                            let _ = reader_handle.join();
+                            return Err(err);
                         }
                     }
                     break;
@@ -546,6 +533,221 @@ pub fn parse_codex_jsonl(stdout: &str) -> (String, TokenUsage) {
         .cloned()
         .unwrap_or_else(|| stdout.trim().to_string());
     (text, usage)
+}
+
+fn dispatch_codex_line<F>(
+    line: &str,
+    dev_mode: bool,
+    on_event: &mut F,
+    message_texts: &mut Vec<String>,
+    last_sent_text: &mut String,
+    usage: &mut TokenUsage,
+) -> Result<(), String>
+where
+    F: FnMut(CodexStreamEvent) -> Result<(), String>,
+{
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    if dev_mode {
+        on_event(CodexStreamEvent::Raw(trimmed.to_string()))?;
+    }
+
+    let Ok(event) = serde_json::from_str::<Value>(trimmed) else {
+        return Ok(());
+    };
+
+    if let Some(text) = extract_message_text(&event) {
+        message_texts.push(text.clone());
+        let delta = if text.starts_with(last_sent_text.as_str()) {
+            text[last_sent_text.len()..].to_string()
+        } else {
+            text.clone()
+        };
+        if !delta.is_empty() {
+            on_event(CodexStreamEvent::TextDelta(delta))?;
+            *last_sent_text = text;
+        }
+    }
+
+    for classified in classify_codex_event(&event) {
+        match classified {
+            CodexClassifiedEvent::Reasoning(text) => {
+                on_event(CodexStreamEvent::Reasoning(text))?;
+            }
+            CodexClassifiedEvent::Activity(text) => {
+                on_event(CodexStreamEvent::Activity(text))?;
+            }
+        }
+    }
+
+    if let Some(next_usage) = extract_usage(&event) {
+        *usage = next_usage;
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CodexClassifiedEvent {
+    Reasoning(String),
+    Activity(String),
+}
+
+fn classify_codex_event(event: &Value) -> Vec<CodexClassifiedEvent> {
+    let mut out = Vec::new();
+    let top_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
+
+    if let Some(text) = extract_reasoning_text(event) {
+        if !text.trim().is_empty() {
+            out.push(CodexClassifiedEvent::Reasoning(text));
+        }
+    }
+
+    if let Some(activity) = activity_from_top_level(top_type, event) {
+        out.push(CodexClassifiedEvent::Activity(activity));
+    }
+
+    if let Some(item) = event.get("item") {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        if let Some(activity) = activity_from_item(item_type, item, top_type) {
+            out.push(CodexClassifiedEvent::Activity(activity));
+        }
+    }
+
+    out
+}
+
+fn extract_reasoning_text(event: &Value) -> Option<String> {
+    let top_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
+    if matches!(
+        top_type,
+        "agent_reasoning" | "agent_reasoning_delta" | "reasoning" | "reasoning_delta"
+    ) {
+        for key in ["text", "delta", "content", "message"] {
+            if let Some(text) = event.get(key).and_then(Value::as_str) {
+                if !text.trim().is_empty() {
+                    return Some(text.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(item) = event.get("item") {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        if item_type == "reasoning" {
+            for key in ["text", "content", "message"] {
+                if let Some(text) = item.get(key).and_then(Value::as_str) {
+                    if !text.trim().is_empty() {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+            if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                let text = parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.trim().is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn activity_from_top_level(top_type: &str, event: &Value) -> Option<String> {
+    match top_type {
+        "exec_command_begin" | "command_execution" | "exec_command" => {
+            let cmd = event
+                .get("command")
+                .or_else(|| event.get("cmd"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if cmd.is_empty() {
+                None
+            } else {
+                Some(format!("running: {cmd}"))
+            }
+        }
+        "read_file" | "file_read" => {
+            let path = event
+                .get("path")
+                .or_else(|| event.get("file"))
+                .and_then(Value::as_str)
+                .unwrap_or("file");
+            Some(format!("read file: {path}"))
+        }
+        "mcp_tool_call" | "tool_use" | "tool_call" => {
+            let name = event
+                .get("name")
+                .or_else(|| event.get("tool_name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            Some(format!("tool: {name}"))
+        }
+        "skill_use" | "skill_view" => {
+            let name = event
+                .get("name")
+                .or_else(|| event.get("skill"))
+                .and_then(Value::as_str)
+                .unwrap_or("skill");
+            Some(format!("skill: {name}"))
+        }
+        _ => None,
+    }
+}
+
+fn activity_from_item(item_type: &str, item: &Value, top_type: &str) -> Option<String> {
+    match item_type {
+        "command_execution" | "exec_command" => {
+            let cmd = item
+                .get("command")
+                .or_else(|| item.get("cmd"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if cmd.is_empty() {
+                None
+            } else {
+                let prefix = if matches!(top_type, "item.started" | "item.in_progress") {
+                    "running"
+                } else {
+                    "ran"
+                };
+                Some(format!("{prefix}: {cmd}"))
+            }
+        }
+        "file_change" | "file_edit" => {
+            let path = item
+                .get("path")
+                .or_else(|| item.get("file"))
+                .and_then(Value::as_str)
+                .unwrap_or("file");
+            Some(format!("edit file: {path}"))
+        }
+        "mcp_tool_call" | "tool_use" | "tool_call" => {
+            let name = item
+                .get("name")
+                .or_else(|| item.get("tool_name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            Some(format!("tool: {name}"))
+        }
+        "read_file" | "file_read" => {
+            let path = item
+                .get("path")
+                .or_else(|| item.get("file"))
+                .and_then(Value::as_str)
+                .unwrap_or("file");
+            Some(format!("read file: {path}"))
+        }
+        _ => None,
+    }
 }
 
 fn extract_message_text(event: &Value) -> Option<String> {
@@ -825,5 +1027,38 @@ mod tests {
             resolve_codex_command("/tmp/codex"),
             std::path::PathBuf::from("/tmp/codex")
         );
+    }
+
+    #[test]
+    fn classifies_reasoning_events() {
+        let event: Value = serde_json::from_str(
+            r#"{"type":"item.completed","item":{"type":"reasoning","text":"Thinking about it"}}"#,
+        )
+        .unwrap();
+        let classified = classify_codex_event(&event);
+        assert!(classified.iter().any(|entry| {
+            matches!(entry, CodexClassifiedEvent::Reasoning(text) if text == "Thinking about it")
+        }));
+    }
+
+    #[test]
+    fn classifies_command_execution_activity() {
+        let event: Value = serde_json::from_str(
+            r#"{"type":"item.started","item":{"type":"command_execution","command":"ls -la"}}"#,
+        )
+        .unwrap();
+        let classified = classify_codex_event(&event);
+        assert!(classified.iter().any(|entry| {
+            matches!(entry, CodexClassifiedEvent::Activity(text) if text == "running: ls -la")
+        }));
+    }
+
+    #[test]
+    fn classifies_read_file_activity() {
+        let event: Value = serde_json::from_str(r#"{"type":"read_file","path":"src/main.rs"}"#).unwrap();
+        let classified = classify_codex_event(&event);
+        assert!(classified.iter().any(|entry| {
+            matches!(entry, CodexClassifiedEvent::Activity(text) if text == "read file: src/main.rs")
+        }));
     }
 }
