@@ -244,16 +244,17 @@ pub fn truncate_message_content(content: &str) -> String {
     truncate_to_max_chars(content, MAX_MESSAGE_CHARS, "truncated")
 }
 
-fn truncate_to_max_chars(content: &str, max_chars: usize, label: &str) -> String {
-    if content.len() <= max_chars {
+fn truncate_to_max_chars(content: &str, max_bytes: usize, label: &str) -> String {
+    if content.len() <= max_bytes {
         return content.to_string();
     }
-    let keep = max_chars.saturating_sub(20 + label.len());
-    format!(
-        "{}... [{label} {} chars]",
-        &content[..keep.min(content.len())],
-        content.len() - keep
-    )
+    let omitted = content.len().saturating_sub(max_bytes);
+    let marker = format!("... [{label} {omitted} chars]");
+    let mut budget = max_bytes.saturating_sub(marker.len());
+    while budget > 0 && !content.is_char_boundary(budget) {
+        budget -= 1;
+    }
+    format!("{}{marker}", &content[..budget])
 }
 
 fn collapse_system_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -1049,6 +1050,14 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "gpt-5.5");
         assert_eq!(models[1].label, "GPT-5.4");
+    }
+
+    #[test]
+    fn truncates_utf8_message_content_without_panicking() {
+        let chinese = "你".repeat(2_000);
+        let truncated = truncate_message_content(&chinese);
+        assert!(truncated.contains("truncated"));
+        assert!(truncated.len() <= MAX_MESSAGE_CHARS + 64);
     }
 
     #[test]

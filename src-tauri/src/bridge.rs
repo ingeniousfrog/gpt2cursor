@@ -264,7 +264,7 @@ fn handle_chat(
             chat.messages.len(),
             body.len() / 1024
         ),
-        settings.dev_mode,
+        true,
     );
     if settings.dev_mode {
         append_log(
