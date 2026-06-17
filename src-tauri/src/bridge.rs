@@ -1,7 +1,7 @@
 use crate::{
     codex::{
-        format_prompt, run_codex_in_pty_streaming, trim_messages_for_codex, ChatMessage,
-        CodexExecutor, CodexStreamEvent, TokenUsage,
+        format_prompt, run_codex_in_pty_streaming, trim_messages_for_codex, truncate_message_content,
+        ChatMessage, CodexExecutor, CodexStreamEvent, TokenUsage, MAX_CODEX_PROMPT_CHARS,
     },
     settings::AppSettings,
 };
@@ -24,6 +24,8 @@ const HOST: &str = "127.0.0.1";
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const ERR_BODY_TOO_LARGE: &str = "request_body_too_large";
 const USER_BODY_TOO_LARGE_HINT: &str = "Request body too large. Lower Context msgs in gpt2cursor, or start a new Cursor Agent chat.";
+const PROMPT_TOO_LARGE_HINT: &str = "Prompt too large after trimming. Lower Context msgs in gpt2cursor, or start a new Cursor Agent chat.";
+const ERR_PROMPT_TOO_LARGE: &str = "prompt_too_large";
 const PARSE_MESSAGE_HEADROOM: usize = 4;
 const MAX_RECENT_LOGS: usize = 40;
 const MAX_RECENT_LOGS_DEV: usize = 200;
@@ -245,11 +247,12 @@ fn handle_chat(
         append_log(
             &usage,
             format!(
-                "pre-trimmed {} -> {} messages (lower Context msgs if this keeps happening)",
+                "pre-trimmed {} -> {} messages ({} KB body; lower Context msgs or start a new chat if this keeps happening)",
                 incoming_message_count,
-                chat.messages.len()
+                chat.messages.len(),
+                body.len() / 1024
             ),
-            settings.dev_mode,
+            true,
         );
     }
     append_log(
@@ -278,6 +281,28 @@ fn handle_chat(
     }
 
     let (prompt, prompt_meta) = build_codex_prompt(&chat.messages, settings);
+    if prompt_meta.prompt_chars > MAX_CODEX_PROMPT_CHARS {
+        append_log(
+            &usage,
+            format!(
+                "{} ({} chars after trim)",
+                PROMPT_TOO_LARGE_HINT, prompt_meta.prompt_chars
+            ),
+            true,
+        );
+        write_json(
+            stream,
+            413,
+            json!({
+                "error": {
+                    "message": PROMPT_TOO_LARGE_HINT,
+                    "type": "invalid_request_error",
+                    "code": ERR_PROMPT_TOO_LARGE
+                }
+            }),
+        )?;
+        return Err(PROMPT_TOO_LARGE_HINT.to_string());
+    }
     append_log(
         &usage,
         format!(
@@ -286,7 +311,7 @@ fn handle_chat(
             prompt_meta.sent_messages,
             settings.codex_timeout_ms / 1000
         ),
-        settings.dev_mode,
+        true,
     );
     if settings.dev_mode {
         append_log(
@@ -299,10 +324,12 @@ fn handle_chat(
         append_log(
             &usage,
             format!(
-                "trimmed history {} -> {} messages for codex",
-                prompt_meta.original_messages, prompt_meta.sent_messages
+                "trimmed history {} -> {} messages, {} chars prompt",
+                prompt_meta.original_messages,
+                prompt_meta.sent_messages,
+                prompt_meta.prompt_chars
             ),
-            settings.dev_mode,
+            true,
         );
     }
 
@@ -825,7 +852,10 @@ fn parse_message(index: usize, message: &Value) -> ChatMessage {
             .map(|serialized| format!("[message {index}]: {serialized}"))
             .unwrap_or_default()
     };
-    ChatMessage { role, content }
+    ChatMessage {
+        role,
+        content: truncate_message_content(&content),
+    }
 }
 
 fn is_explicitly_empty_content(message: &Value) -> bool {

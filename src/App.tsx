@@ -946,7 +946,7 @@ export default function App() {
 
 function formatLastError(error: string): { title: string; hints: string[] } {
   const lower = error.toLowerCase();
-  if (lower.includes("request body too large")) {
+  if (lower.includes("request body too large") || lower.includes("prompt too large")) {
     return {
       title: error,
       hints: [

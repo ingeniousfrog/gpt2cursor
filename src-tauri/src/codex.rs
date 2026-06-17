@@ -237,6 +237,54 @@ pub fn resolve_codex_command(command: &str) -> PathBuf {
 
 pub const MAX_CODEX_PROMPT_CHARS: usize = 32_000;
 const MAX_MESSAGE_CHARS: usize = 4_000;
+const MAX_SYSTEM_CHARS: usize = 8_000;
+const MAX_LATEST_USER_CHARS: usize = 10_000;
+
+pub fn truncate_message_content(content: &str) -> String {
+    truncate_to_max_chars(content, MAX_MESSAGE_CHARS, "truncated")
+}
+
+fn truncate_to_max_chars(content: &str, max_chars: usize, label: &str) -> String {
+    if content.len() <= max_chars {
+        return content.to_string();
+    }
+    let keep = max_chars.saturating_sub(20 + label.len());
+    format!(
+        "{}... [{label} {} chars]",
+        &content[..keep.min(content.len())],
+        content.len() - keep
+    )
+}
+
+fn collapse_system_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut system_parts = Vec::new();
+    let mut non_system = Vec::new();
+
+    for message in messages {
+        if message.role == "system" {
+            let trimmed = message.content.trim();
+            if !trimmed.is_empty() {
+                system_parts.push(trimmed.to_string());
+            }
+        } else {
+            non_system.push(message.clone());
+        }
+    }
+
+    let mut collapsed = Vec::new();
+    if !system_parts.is_empty() {
+        collapsed.push(ChatMessage {
+            role: "system".to_string(),
+            content: truncate_to_max_chars(
+                &system_parts.join("\n\n"),
+                MAX_SYSTEM_CHARS,
+                "system notes truncated",
+            ),
+        });
+    }
+    collapsed.extend(non_system);
+    collapsed
+}
 
 pub fn trim_messages_for_codex(
     messages: &[ChatMessage],
@@ -247,9 +295,10 @@ pub fn trim_messages_for_codex(
         return (Vec::new(), 0);
     }
 
+    let messages = collapse_system_messages(messages);
     let max_messages = max_messages.max(1);
-    if original_len <= max_messages && format_prompt(messages).len() <= MAX_CODEX_PROMPT_CHARS {
-        return (messages.to_vec(), original_len);
+    if messages.len() <= max_messages && format_prompt(&messages).len() <= MAX_CODEX_PROMPT_CHARS {
+        return (messages, original_len);
     }
 
     let system = messages
@@ -281,25 +330,69 @@ pub fn trim_messages_for_codex(
         })
         .collect();
 
-    while trimmed.len() > 1 && format_prompt(&trimmed).len() > MAX_CODEX_PROMPT_CHARS {
-        let Some(index) = trimmed.iter().position(|message| message.role != "system") else {
-            break;
-        };
-        trimmed.remove(index);
-    }
+    shrink_prompt_messages(&mut trimmed);
 
     (trimmed, original_len)
 }
 
-fn truncate_message_content(content: &str) -> String {
-    if content.len() <= MAX_MESSAGE_CHARS {
-        return content.to_string();
+fn shrink_prompt_messages(messages: &mut Vec<ChatMessage>) {
+    while messages.len() > 1 && format_prompt(messages).len() > MAX_CODEX_PROMPT_CHARS {
+        let non_system_indexes = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role != "system")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+
+        if non_system_indexes.len() > 1 {
+            messages.remove(non_system_indexes[0]);
+            continue;
+        }
+
+        if let Some(index) = messages.iter().position(|message| message.role == "system") {
+            let current_len = messages[index].content.len();
+            if current_len > 500 {
+                let next_len = (current_len * 4 / 5).max(500);
+                messages[index].content =
+                    truncate_to_max_chars(&messages[index].content, next_len, "system notes truncated");
+                continue;
+            }
+        }
+
+        if let Some(index) = non_system_indexes.first().copied() {
+            let current_len = messages[index].content.len();
+            if current_len > 500 {
+                let next_len = (current_len * 4 / 5).max(500);
+                messages[index].content =
+                    truncate_to_max_chars(&messages[index].content, next_len, "truncated");
+                continue;
+            }
+        }
+
+        break;
     }
-    format!(
-        "{}... [truncated {} chars]",
-        &content[..MAX_MESSAGE_CHARS],
-        content.len() - MAX_MESSAGE_CHARS
-    )
+
+    if format_prompt(messages).len() > MAX_CODEX_PROMPT_CHARS {
+        if let Some(index) = messages.iter().position(|message| message.role == "system") {
+            messages[index].content = truncate_to_max_chars(
+                &messages[index].content,
+                MAX_SYSTEM_CHARS / 2,
+                "system notes truncated",
+            );
+        }
+        if format_prompt(messages).len() > MAX_CODEX_PROMPT_CHARS {
+            if let Some(index) = messages
+                .iter()
+                .rposition(|message| message.role == "user")
+            {
+                messages[index].content = truncate_to_max_chars(
+                    &messages[index].content,
+                    MAX_LATEST_USER_CHARS / 2,
+                    "truncated",
+                );
+            }
+        }
+    }
 }
 
 pub enum CodexStreamEvent {
@@ -496,11 +589,17 @@ Do not run shell commands or edit files unless the latest user message clearly a
     );
 
     if !system_notes.is_empty() {
-        prompt.push_str(&format!("System notes:\n{}\n\n", system_notes.join("\n")));
+        let joined = truncate_to_max_chars(
+            &system_notes.join("\n\n"),
+            MAX_SYSTEM_CHARS,
+            "system notes truncated",
+        );
+        prompt.push_str(&format!("System notes:\n{joined}\n\n"));
     }
     if !history.is_empty() {
         prompt.push_str(&format!("Earlier conversation:\n{}\n\n", history.join("\n\n")));
     }
+    latest_user = truncate_to_max_chars(&latest_user, MAX_LATEST_USER_CHARS, "truncated");
     prompt.push_str(&format!("Latest user message:\n{latest_user}"));
     prompt
 }
@@ -992,6 +1091,25 @@ mod tests {
         assert_eq!(trimmed.len(), 2);
         assert_eq!(trimmed[0].role, "system");
         assert_eq!(trimmed[1].content, "latest");
+    }
+
+    #[test]
+    fn collapses_many_system_messages_under_prompt_limit() {
+        let mut messages = (0..80)
+            .map(|index| ChatMessage {
+                role: "system".to_string(),
+                content: format!("system block {index} {}", "x".repeat(2_000)),
+            })
+            .collect::<Vec<_>>();
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "latest question".to_string(),
+        });
+        let (trimmed, original) = trim_messages_for_codex(&messages, 12);
+        assert_eq!(original, 81);
+        assert!(trimmed.iter().filter(|message| message.role == "system").count() <= 1);
+        assert!(format_prompt(&trimmed).len() <= MAX_CODEX_PROMPT_CHARS);
+        assert_eq!(trimmed.last().unwrap().content, "latest question");
     }
 
     #[test]
