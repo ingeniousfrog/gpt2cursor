@@ -17,12 +17,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ingeniousfrog/gpt2cursor/releases"><img alt="release" src="https://img.shields.io/badge/release-v0.4.2-orange?style=flat-square"></a>
+  <a href="https://github.com/ingeniousfrog/gpt2cursor/releases"><img alt="release" src="https://img.shields.io/badge/release-v0.4.3-orange?style=flat-square"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square"></a>
 </p>
 
 <p align="center">
-  Last updated: 2026-06-16
+  Last updated: 2026-06-17
 </p>
 
 ## 快速开始
@@ -39,8 +39,8 @@
 
 | 平台 | 安装包 | 状态 |
 | --- | --- | --- |
-| macOS（Apple Silicon） | `gpt2cursor_0.4.2_aarch64.dmg` | 稳定 |
-| Windows（x64） | `gpt2cursor_0.4.2_x64-setup.exe` | 实验性 |
+| macOS（Apple Silicon） | `gpt2cursor_0.4.3_aarch64.dmg` | 稳定 |
+| Windows（x64） | `gpt2cursor_0.4.3_x64-setup.exe` | 实验性 |
 
 运行依赖：同机 **Codex CLI 已登录**。终端用户**不需要** Node.js。
 
@@ -55,8 +55,12 @@ Cursor 支持 OpenAI-compatible provider，Codex CLI 则使用你本机的登录
 ## 亮点
 
 - Tauri 原生应用（macOS 菜单栏 + Windows 托盘）。
+- **单实例运行** —— 开机自启不再出现双图标或端口冲突。
 - OpenAI-compatible 接口：`GET /v1/models`、`GET /healthz`、`POST /v1/chat/completions`。
 - PTY 流式桥接，兼容 Cursor Ask / Agent。
+- **Codex 实时进度** —— 推理、工具/文件操作日志，面板与 Cursor 同步展示。
+- **Dev 模式** —— 活动日志弹窗内可开关，查看原始请求、JSONL 与结果。
+- **深色 / 浅色主题** —— 底部主题切换，偏好持久化。
 - 本地 bearer key（`g2c_...`）保护 bridge。
 - Activity 面板实时请求日志。
 - ngrok 公网隧道，让 Cursor 云端访问本机 bridge（Ask 与 Agent 均需）。
@@ -118,7 +122,7 @@ flowchart LR
 
 ### Windows
 
-1. 运行 `gpt2cursor_0.4.2_x64-setup.exe`。
+1. 运行 `gpt2cursor_0.4.3_x64-setup.exe`。
 2. 若 SmartScreen 提示：选择 **更多信息 → 仍要运行**。
 
 安装与排障详见 [docs/HOW_TO_USE_CN.md](docs/HOW_TO_USE_CN.md)

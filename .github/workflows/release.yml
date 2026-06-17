@@ -91,10 +91,11 @@ jobs:
             - **Windows (x64)**: `gpt2cursor_*_x64-setup.exe`
 
             ### What's New
-            - **Agent history pre-trimming**: Large Cursor Agent histories are trimmed before Codex execution
-            - **Clear oversized-body errors**: HTTP 413 plus UI hints to lower Context msgs or start a new Agent chat
-            - **Apache 2.0 license**
-            - **Docs**: ngrok required for both Ask and Agent modes
+            - **Single-instance app**: No duplicate tray icons or port conflicts on launch-at-login
+            - **Live Codex progress**: Reasoning and tool/file activity in the panel and streamed to Cursor via `reasoning_content`
+            - **Dev mode**: Toggle in the activity popover for raw request, JSONL, and result logs
+            - **Dark & light themes**: Footer theme switch with persisted preference
+            - **UI refresh**: Glass-style panel, improved activity log layout
 
             ### Install — macOS
             1. Open the DMG and drag **gpt2cursor** onto **Applications**
@@ -116,10 +117,11 @@ jobs:
             - **Windows（x64）**：`gpt2cursor_*_x64-setup.exe`
 
             ### 更新内容
-            - **Agent 历史预裁剪**：过大的 Cursor Agent 历史会在调用 Codex 前自动裁剪
-            - **请求过大时的明确提示**：返回 413，并在界面提示降低 Context msgs 或新开 Agent 会话
-            - **Apache 2.0 许可证**
-            - **文档修正**：Ask / Agent 均需 ngrok 公网地址
+            - **单实例运行**：开机自启不再出现双图标或端口冲突
+            - **Codex 实时进度**：推理与工具/文件操作日志，面板与 Cursor 同步展示
+            - **Dev 模式**：活动日志弹窗内可开关，查看原始请求、JSONL 与结果
+            - **深色 / 浅色主题**：底部主题切换，偏好持久化
+            - **界面优化**：玻璃风格面板与活动日志布局改进
 
             ### 安装 — macOS
             1. 打开 DMG，拖到 **Applications**

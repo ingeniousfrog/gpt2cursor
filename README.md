@@ -17,12 +17,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ingeniousfrog/gpt2cursor/releases"><img alt="release" src="https://img.shields.io/badge/release-v0.4.2-orange?style=flat-square"></a>
+  <a href="https://github.com/ingeniousfrog/gpt2cursor/releases"><img alt="release" src="https://img.shields.io/badge/release-v0.4.3-orange?style=flat-square"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square"></a>
 </p>
 
 <p align="center">
-  Last updated: 2026-06-16
+  Last updated: 2026-06-17
 </p>
 
 ## Quick Start
@@ -39,8 +39,8 @@ Full walkthrough: [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)
 
 | Platform | Artifact | Status |
 | --- | --- | --- |
-| macOS (Apple Silicon) | `gpt2cursor_0.4.2_aarch64.dmg` | Stable |
-| Windows (x64) | `gpt2cursor_0.4.2_x64-setup.exe` | Experimental |
+| macOS (Apple Silicon) | `gpt2cursor_0.4.3_aarch64.dmg` | Stable |
+| Windows (x64) | `gpt2cursor_0.4.3_x64-setup.exe` | Experimental |
 
 Runtime requirements: **Codex CLI logged in on the same machine**. Node.js is **not** required for end users.
 
@@ -56,8 +56,12 @@ No cloud relay. No account-sharing service. Not a replacement for the official O
 ## Highlights
 
 - Native Tauri app (macOS menu-bar + Windows tray).
+- **Single-instance** — no duplicate tray icons or port conflicts on launch.
 - OpenAI-compatible endpoints: `GET /v1/models`, `GET /healthz`, `POST /v1/chat/completions`.
 - PTY streaming bridge for Cursor Ask / Agent compatibility.
+- **Live Codex progress** — reasoning, tool/file activity in the panel and streamed to Cursor.
+- **Dev mode** — raw request / JSONL / result logs in the activity popover.
+- **Dark & light themes** — switch from the footer theme toggle.
 - Local bearer key (`g2c_...`) protecting the bridge.
 - Activity panel with live request logs.
 - ngrok public tunnel so Cursor cloud can reach your local bridge (Ask & Agent).
@@ -119,7 +123,7 @@ Details: [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)
 
 ### Windows
 
-1. Run `gpt2cursor_0.4.2_x64-setup.exe`.
+1. Run `gpt2cursor_0.4.3_x64-setup.exe`.
 2. If SmartScreen warns: **More info → Run anyway**.
 
 Install and troubleshooting details: [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md)
